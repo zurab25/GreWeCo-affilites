@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/context/AuthContext";
+import { AFFILIATES_APP_HOST } from "@/lib/branding";
 
 export default function LoginPage() {
   const { user, loading, configured, signIn } = useAuth();
@@ -72,7 +73,7 @@ export default function LoginPage() {
         <CardTitle className="text-xl">GreWeCo Affiliates</CardTitle>
         <CardDescription>
           Sign in to manage links, analytics, and payouts for{" "}
-          <span className="text-zinc-400">affiliates.cree.eco</span>
+          <span className="font-mono text-zinc-400">{AFFILIATES_APP_HOST}</span>
         </CardDescription>
       </CardHeader>
       <CardContent>

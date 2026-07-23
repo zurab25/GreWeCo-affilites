@@ -37,7 +37,7 @@ export default function DashboardOverviewPage() {
           <span className="text-zinc-400">GreWeCo command</span>
         </h2>
         <p className="max-w-2xl text-sm leading-relaxed text-zinc-500">
-          Real-time performance for your cree.eco referrals. Stats sync from Firestore as your
+          Real-time performance for your arena.grew.eco referrals. Stats sync from Firestore as your
           integration lands traffic and conversion events.
         </p>
       </div>
@@ -64,7 +64,7 @@ export default function DashboardOverviewPage() {
         <StatCard
           label="Referral ID"
           value={profile?.referralId ?? "—"}
-          delta="Embedded in your cree.eco links"
+          delta="Embedded in Arena & grew.eco attribution links"
           icon={ArrowUpRight}
         />
       </div>
@@ -96,7 +96,7 @@ export default function DashboardOverviewPage() {
           <CardHeader>
             <CardTitle className="text-base">Compliance</CardTitle>
             <CardDescription>
-              Always disclose affiliate relationships and follow cree.eco brand guidelines in your
+              Always disclose affiliate relationships and follow grew.eco brand guidelines in your
               territory.
             </CardDescription>
           </CardHeader>

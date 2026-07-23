@@ -62,7 +62,7 @@ export function TabsList({
   return (
     <div
       className={cn(
-        "inline-flex flex-wrap gap-1 rounded-lg border border-white/10 bg-black/30 p-1",
+        "glass-panel inline-flex flex-wrap gap-1 rounded-lg p-1",
         className
       )}
       role="tablist"
@@ -91,9 +91,9 @@ export function TabsTrigger({
       aria-selected={active}
       onClick={() => ctx.setValue(value)}
       className={cn(
-        "rounded-md px-3 py-1.5 text-xs font-medium transition",
+        "rounded-md px-3 py-1.5 font-sans text-xs font-medium transition",
         active
-          ? "bg-gradient-to-r from-cyan-500/20 to-violet-600/25 text-white shadow-[0_0_16px_rgba(34,211,238,0.12)]"
+          ? "neon-border-cyan bg-gradient-to-r from-cyan-500/22 to-violet-600/18 text-white shadow-[0_0_18px_rgba(34,211,238,0.15)]"
           : "text-zinc-400 hover:text-zinc-200",
         className
       )}

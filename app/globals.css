@@ -1,22 +1,31 @@
 @import "tailwindcss";
 
+/* Optional: Tailwind CLI / tooling discovers theme extensions from repo root */
+@config "../tailwind.config.ts";
+
 @theme inline {
   --font-sans: var(--font-outfit), ui-sans-serif, system-ui;
   --font-mono: var(--font-jetbrains), ui-monospace, monospace;
 
-  --color-noir-950: #050508;
-  --color-noir-900: #0a0a10;
+  /* Arena Cyber-Noir — core palette */
+  --color-arena-noir: #050508;
+  --color-arena-ink: #06060c;
+  --color-arena-panel: #080910;
+  --color-arena-edge: rgba(255, 255, 255, 0.08);
+
   --color-cyan-glow: #22d3ee;
   --color-violet-glow: #a855f7;
 
-  --shadow-glow-cyan: 0 0 40px -10px rgba(34, 211, 238, 0.45);
-  --shadow-glow-violet: 0 0 48px -12px rgba(168, 85, 247, 0.4);
+  --shadow-glow-cyan: 0 0 40px -8px rgba(34, 211, 238, 0.4);
+  --shadow-glow-violet: 0 0 48px -12px rgba(168, 85, 247, 0.35);
+
+  --radius-arena: 0.75rem;
 }
 
 @layer base {
   :root {
     color-scheme: dark;
-    --background: var(--color-noir-950);
+    --background: var(--color-arena-noir);
     --foreground: #e4e4e7;
     --muted: #71717a;
   }
@@ -30,29 +39,76 @@
     background-color: var(--background);
     color: var(--foreground);
     background-image:
-      radial-gradient(1200px circle at 10% -10%, rgba(34, 211, 238, 0.08), transparent 50%),
-      radial-gradient(900px circle at 90% 0%, rgba(168, 85, 247, 0.07), transparent 45%),
-      linear-gradient(180deg, #050508 0%, #06060c 40%, #050508 100%);
+      radial-gradient(
+        900px circle at 12% -8%,
+        rgba(34, 211, 238, 0.09),
+        transparent 52%
+      ),
+      radial-gradient(
+        760px circle at 88% 4%,
+        rgba(168, 85, 247, 0.08),
+        transparent 48%
+      ),
+      linear-gradient(180deg, #050508 0%, #07070e 42%, #050508 100%);
     background-attachment: fixed;
   }
 
   ::selection {
-    background: rgba(34, 211, 238, 0.25);
+    background: rgba(34, 211, 238, 0.28);
     color: #fafafa;
+  }
+
+  /* Headings → Outfit + Arena tracking */
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-outfit), ui-sans-serif, system-ui;
+    letter-spacing: -0.025em;
   }
 }
 
-/* Subtle grid overlay for tech aesthetic */
+/* Grid veil — Arena-style tech canvas */
 .noir-grid::before {
   content: "";
   pointer-events: none;
   position: fixed;
   inset: 0;
   z-index: 0;
-  opacity: 0.22;
+  opacity: 0.2;
   background-image:
-    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+    linear-gradient(rgba(255, 255, 255, 0.034) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.034) 1px, transparent 1px);
   background-size: 56px 56px;
-  mask-image: radial-gradient(ellipse 80% 60% at 50% 20%, black, transparent);
+  mask-image: radial-gradient(ellipse 85% 65% at 50% 18%, black, transparent);
+}
+
+/* Shared glass surfaces (Arena glassmorphism) */
+@utility glass-panel {
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.085);
+  backdrop-filter: blur(20px) saturate(165%);
+  -webkit-backdrop-filter: blur(20px) saturate(165%);
+  box-shadow:
+    0 0 0 1px rgba(168, 85, 247, 0.05),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 8px 32px rgba(0, 0, 0, 0.35);
+}
+
+@utility glass-card {
+  background: rgba(8, 9, 16, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(16px) saturate(160%);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  box-shadow:
+    0 0 40px -18px rgba(34, 211, 238, 0.2),
+    0 0 0 1px rgba(168, 85, 247, 0.045),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+@utility neon-border-cyan {
+  box-shadow: inset 0 0 0 1px rgba(34, 211, 238, 0.25), 0 0 28px rgba(34, 211, 238, 0.12);
+}
+
+@utility neon-border-violet {
+  box-shadow: inset 0 0 0 1px rgba(168, 85, 247, 0.2), 0 0 30px rgba(168, 85, 247, 0.1);
 }

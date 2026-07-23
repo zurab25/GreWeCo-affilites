@@ -178,7 +178,7 @@ export default function LeaderboardPage() {
                           {bonus}
                         </span>
                       ) : null}
-                      <p className="text-sm tabular-nums text-cyan-300/90">
+                      <p className="font-mono text-sm tabular-nums text-cyan-300/90">
                         {formatVolume(row.directBonus)}
                       </p>
                     </div>

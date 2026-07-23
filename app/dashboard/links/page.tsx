@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Check,
   Copy,
+  Fingerprint,
   LineChart,
   RadioTower,
 } from "lucide-react";
@@ -25,7 +26,9 @@ import {
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/context/AuthContext";
 import { buildArenaJoinUrl } from "@/lib/arena";
+import { ARENA_JOIN_PATH_LABEL } from "@/lib/branding";
 import { fetchClicksAnalyticsGrouped } from "@/lib/clicks-analytics";
+import { resolveAffiliateReferralCode } from "@/lib/referral";
 import {
   ARENA_PLATFORM_KEYS,
   ARENA_PLATFORM_LABELS,
@@ -75,19 +78,19 @@ function MetricsBlock({ clicks, conversions }: MetricsBlockProps) {
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="rounded-lg border border-cyan-500/20 bg-black/30 px-3 py-2 text-xs">
           <p className="text-zinc-500">Total clicks</p>
-          <p className="mt-1 text-lg font-semibold tabular-nums text-white">
+          <p className="mt-1 font-mono text-lg font-semibold tabular-nums tracking-tight text-white">
             {clicks.toLocaleString()}
           </p>
         </div>
         <div className="rounded-lg border border-violet-500/20 bg-black/30 px-3 py-2 text-xs">
           <p className="text-zinc-500">Conversions</p>
-          <p className="mt-1 text-lg font-semibold tabular-nums text-white">
+          <p className="mt-1 font-mono text-lg font-semibold tabular-nums tracking-tight text-white">
             {conversions.toLocaleString()}
           </p>
         </div>
         <div className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-xs">
           <p className="text-zinc-500">Conv. rate</p>
-          <p className="mt-1 text-lg font-semibold tabular-nums text-white">
+          <p className="mt-1 font-mono text-lg font-semibold tabular-nums tracking-tight text-white">
             {rate}%
           </p>
         </div>
@@ -97,12 +100,14 @@ function MetricsBlock({ clicks, conversions }: MetricsBlockProps) {
 }
 
 export default function DashboardLinksPage() {
-  const { user, loading: authLoading } = useAuth();
+  const { user, profile, loading: authLoading } = useAuth();
   const uid = user?.uid;
+  const referralCode = resolveAffiliateReferralCode(profile, user);
 
   const [platform, setPlatform] = useState<ArenaPlatformKey>("instagram");
   const [generatedUrl, setGeneratedUrl] = useState("");
-  const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
 
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState<string | null>(null);
@@ -147,18 +152,24 @@ export default function DashboardLinksPage() {
   }, [uid, refreshAnalytics]);
 
   function generateLink() {
-    if (!uid) return;
-    setGeneratedUrl(buildArenaJoinUrl(uid, platform));
+    if (!referralCode) return;
+    setGeneratedUrl(buildArenaJoinUrl(referralCode, platform));
   }
 
-  async function copyLink() {
-    if (!generatedUrl) return;
+  async function copyToClipboard(text: string, which: "link" | "code") {
+    if (!text) return;
     try {
-      await navigator.clipboard.writeText(generatedUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
+      await navigator.clipboard.writeText(text);
+      if (which === "link") {
+        setCopiedLink(true);
+        setTimeout(() => setCopiedLink(false), 1600);
+      } else {
+        setCopiedCode(true);
+        setTimeout(() => setCopiedCode(false), 1600);
+      }
     } catch {
-      setCopied(false);
+      if (which === "link") setCopiedLink(false);
+      else setCopiedCode(false);
     }
   }
 
@@ -170,10 +181,53 @@ export default function DashboardLinksPage() {
         </p>
         <h2 className="mt-2 text-2xl font-semibold text-white">Links & analytics</h2>
         <p className="mt-2 max-w-2xl text-sm text-zinc-500">
-          Build per-channel arena join URLs with your UID and source. Analytics pull from the{" "}
-          <code className="text-zinc-400">clicks_analytics</code> collection for your affiliate ID.
+          Share your standalone referral code or per-channel Arena join URLs. The same code powers{" "}
+          <code className="font-mono text-zinc-400">ref=</code> on every generated link. Analytics
+          pull from <code className="text-zinc-400">clicks_analytics</code> for your affiliate ID.
         </p>
       </div>
+
+      <Card className="neon-border-cyan border-cyan-500/20">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-lg">
+            <Fingerprint className="h-5 w-5 text-cyan-300" aria-hidden />
+            Your referral code
+          </CardTitle>
+          <CardDescription>
+            New users can enter this code manually during signup on arena.grew.eco. It is also
+            embedded as <code className="font-mono text-zinc-500">ref</code> in your tracked links
+            below.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-end">
+          <Input
+            readOnly
+            label="Referral code"
+            className="font-mono text-base font-semibold tracking-widest text-cyan-100 sm:flex-1"
+            value={
+              authLoading
+                ? "Loading…"
+                : referralCode || "No code available — complete registration."
+            }
+          />
+          <Button
+            type="button"
+            disabled={!referralCode}
+            onClick={() => void copyToClipboard(referralCode, "code")}
+            className="w-full shrink-0 gap-2 sm:w-auto"
+          >
+            {copiedCode ? (
+              <>
+                <Check className="h-4 w-4" /> Copied code
+              </>
+            ) : (
+              <>
+                <Copy className="h-4 w-4" /> Copy code
+              </>
+            )}
+          </Button>
+        </CardContent>
+      </Card>
 
       <Card className="border-cyan-500/15">
         <CardHeader>
@@ -182,10 +236,11 @@ export default function DashboardLinksPage() {
             Multi-channel link generator
           </CardTitle>
           <CardDescription>
-            Select a platform and generate{" "}
-            <code className="text-zinc-400">arena.cree.eco/join</code> with{" "}
-            <code className="text-zinc-400">ref</code> and{" "}
-            <code className="text-zinc-400">source</code>.
+            Generates{" "}
+            <code className="font-mono text-zinc-400">
+              {ARENA_JOIN_PATH_LABEL}?ref=YOUR_CODE&source=…
+            </code>{" "}
+            using the referral code above.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
@@ -214,7 +269,7 @@ export default function DashboardLinksPage() {
           <Button
             type="button"
             onClick={generateLink}
-            disabled={authLoading || !uid}
+            disabled={authLoading || !referralCode}
             className="w-full sm:w-auto"
           >
             Generate link
@@ -222,11 +277,12 @@ export default function DashboardLinksPage() {
           <Input
             readOnly
             label="Generated URL"
+            className="font-mono text-xs tracking-tight"
             value={
               generatedUrl ||
               (authLoading
                 ? "Loading session…"
-                : uid
+                : referralCode
                   ? 'Click "Generate link" to build your arena URL.'
                   : "Sign in required.")
             }
@@ -235,10 +291,10 @@ export default function DashboardLinksPage() {
             <Button
               type="button"
               disabled={!generatedUrl}
-              onClick={() => void copyLink()}
+              onClick={() => void copyToClipboard(generatedUrl, "link")}
               className="gap-2"
             >
-              {copied ? (
+              {copiedLink ? (
                 <>
                   <Check className="h-4 w-4" /> Copied
                 </>

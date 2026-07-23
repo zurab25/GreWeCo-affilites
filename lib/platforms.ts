@@ -1,4 +1,4 @@
-/** Lowercase `source` values sent to arena.cree.eco */
+/** Lowercase `source` query values sent with `arena.grew.eco/join` links */
 export const ARENA_PLATFORM_KEYS = [
   "instagram",
   "facebook",

@@ -26,7 +26,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-screen bg-[#050508]">
       <DashboardSidebar />
-      <div className="flex min-h-screen flex-1 flex-col">
+      <div className="relative z-[1] flex min-h-screen flex-1 flex-col">
         <DashboardNavbar title={title} />
         <main className="flex-1 px-4 py-6 md:px-8">{children}</main>
       </div>

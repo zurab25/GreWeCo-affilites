@@ -1,6 +1,12 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
+import {
+  AFFILIATES_APP_HOST,
+  buildReferralLandingUrl,
+  DOMAINS,
+} from "@/lib/branding";
+
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
@@ -17,10 +23,12 @@ export function generateReferralId(length = 8): string {
   return out;
 }
 
-export const AFFILIATE_BASE_URL = "https://cree.eco";
+/** @deprecated Prefer `DOMAINS.arena` from `@/lib/branding` */
+export const AFFILIATE_BASE_URL = DOMAINS.arena;
 
+/** Landing URL on Arena with referral code (`ref` query) */
 export function buildReferralUrl(refId: string): string {
-  const url = new URL(AFFILIATE_BASE_URL);
-  url.searchParams.set("ref", refId);
-  return url.toString();
+  return buildReferralLandingUrl(refId);
 }
+
+export { AFFILIATES_APP_HOST };

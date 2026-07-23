@@ -19,17 +19,17 @@ const jetbrains = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://affiliates.cree.eco"),
+  metadataBase: new URL("https://affiliates.grew.eco"),
   title: {
     default: "GreWeCo Affiliates",
     template: "%s · GreWeCo Affiliates",
   },
   description:
-    "GreWeCo affiliate platform — track performance, share your referral link, and grow with cree.eco.",
+    "GreWeCo affiliate platform — track performance on arena.grew.eco, share attribution links, and grow with grew.eco.",
   openGraph: {
     title: "GreWeCo Affiliates",
-    description: "Cyber-Noir affiliate workspace for cree.eco partners.",
-    url: "https://affiliates.cree.eco",
+    description: "Cyber-Noir affiliate workspace aligned with Arena.",
+    url: "https://affiliates.grew.eco",
     siteName: "GreWeCo Affiliates",
     locale: "en_US",
     type: "website",
@@ -45,9 +45,12 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${outfit.variable} ${jetbrains.variable} h-full antialiased`}
+      className={`${outfit.variable} ${jetbrains.variable} h-full font-sans antialiased`}
     >
-      <body className="noir-grid min-h-full font-sans">
+      <body
+        className="noir-grid min-h-full font-sans"
+        suppressHydrationWarning
+      >
         <AuthProvider>
           <FirebaseBootstrap>{children}</FirebaseBootstrap>
         </AuthProvider>

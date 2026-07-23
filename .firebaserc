@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "greweco-bf4e0"
+  },
+  "targets": {
+    "greweco-bf4e0": {
+      "hosting": {
+        "affiliates": [
+          "affiliates-greweco"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}

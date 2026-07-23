@@ -1,6 +1,6 @@
 # GreWeCo Affiliate Platform
 
-Production-oriented affiliate workspace for **affiliates.cree.eco**: invite-only auth, partner profiles in Firestore, arena link generation, analytics, and leaderboards.
+Production-oriented affiliate workspace for **affiliates.grew.eco** (aligned with **arena.grew.eco**): invite-only auth, partner profiles in Firestore, Arena join link generation, analytics, and leaderboards.
 
 ## Stack
 
@@ -122,6 +122,10 @@ npm start
 
 Expose `NEXT_PUBLIC_*` vars in your host’s project settings.
 
+## Design (Arena-aligned)
+
+This app mirrors **arena.grew.eco** Cyber-Noir: canvas `#050508`, glass panels (`glass-panel` / `glass-card` in `app/globals.css`), cyan (`#22d3ee`) and violet (`#a855f7`) glow utilities (`neon-border-cyan`, `neon-border-violet`). Typography: **Outfit** as `font-sans`, **JetBrains Mono** for numeric data. Extended tokens also live in `tailwind.config.ts` alongside `@theme` in `globals.css`.
+
 ## Domain
 
-Canonical marketing URL: **https://affiliates.cree.eco** (`metadataBase` in `app/layout.tsx`).
+Canonical host: **https://affiliates.grew.eco** (`metadataBase` in `app/layout.tsx`). Attribution links use **https://arena.grew.eco/join** (`lib/arena.ts`, `lib/branding.ts`).

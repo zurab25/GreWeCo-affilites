@@ -12,7 +12,7 @@ export const Input = forwardRef<
       {label ? (
         <label
           htmlFor={autoId}
-          className="text-xs font-medium uppercase tracking-wider text-zinc-400"
+          className="font-sans text-xs font-medium uppercase tracking-wider text-zinc-400"
         >
           {label}
         </label>
@@ -21,16 +21,18 @@ export const Input = forwardRef<
         ref={ref}
         id={autoId}
         className={cn(
-          "w-full rounded-lg border border-white/10 bg-black/40 px-3.5 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none transition focus:border-cyan-500/50 focus:ring-2 focus:ring-cyan-500/20",
-          error && "border-red-500/40 focus:border-red-500/50 focus:ring-red-500/20",
+          "w-full rounded-lg border border-white/[0.1] bg-[#050508]/45 px-3.5 py-2.5 font-sans text-sm text-zinc-100 placeholder:text-zinc-600 outline-none backdrop-blur-sm transition",
+          "focus:border-cyan-500/55 focus:ring-2 focus:ring-cyan-500/25",
+          error &&
+            "border-red-500/45 focus:border-red-500/55 focus:ring-red-500/25",
           className
         )}
         {...props}
       />
       {error ? (
-        <p className="text-xs text-red-400/90">{error}</p>
+        <p className="font-sans text-xs text-red-400/90">{error}</p>
       ) : hint ? (
-        <p className="text-xs text-zinc-500">{hint}</p>
+        <p className="font-sans text-xs text-zinc-500">{hint}</p>
       ) : null}
     </div>
   );
