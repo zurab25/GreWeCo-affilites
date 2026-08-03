@@ -1,68 +1,87 @@
 import {
   collection,
-  getDocs,
+  onSnapshot,
   query,
   where,
   type Firestore,
+  type QuerySnapshot,
+  type DocumentData,
 } from "firebase/firestore";
 
 import {
-  type ArenaPlatformKey,
+  ARENA_PLATFORM_KEYS,
+  ARENA_PLATFORM_LABELS,
   isArenaPlatformKey,
+  type ArenaPlatformKey,
 } from "@/lib/platforms";
 
-export type PlatformMetrics = Record<
-  ArenaPlatformKey,
+/** Manual referral-code / direct signups channel (non-social). */
+export const CODE_CHANNEL = "code" as const;
+
+/** All affiliate channels: the 4 socials plus the manual referral-code bucket. */
+export const AFFILIATE_CHANNEL_KEYS = [
+  ...ARENA_PLATFORM_KEYS,
+  CODE_CHANNEL,
+] as const;
+
+export type AffiliateChannelKey = ArenaPlatformKey | typeof CODE_CHANNEL;
+
+export const AFFILIATE_CHANNEL_LABELS: Record<AffiliateChannelKey, string> = {
+  ...ARENA_PLATFORM_LABELS,
+  code: "Referral code",
+};
+
+export type ChannelMetrics = Record<
+  AffiliateChannelKey,
   { clicks: number; conversions: number }
 >;
 
-function emptyByPlatform(): PlatformMetrics {
+/** @deprecated Use ChannelMetrics — kept as an alias for existing imports. */
+export type PlatformMetrics = ChannelMetrics;
+
+function emptyByChannel(): ChannelMetrics {
   return {
     instagram: { clicks: 0, conversions: 0 },
     facebook: { clicks: 0, conversions: 0 },
     x: { clicks: 0, conversions: 0 },
     youtube: { clicks: 0, conversions: 0 },
+    code: { clicks: 0, conversions: 0 },
   };
 }
 
-/** Normalize Firestore platform / source strings to our channel keys */
-function normalizePlatform(raw: unknown): ArenaPlatformKey | null {
+/**
+ * Normalize a Firestore `platform`/`source` value to a channel key.
+ * - twitter → x; one of the 4 socials → itself
+ * - code / direct / referral → "code"
+ * - anything else non-empty → "code" (safe default so events are never silently dropped)
+ * - empty/absent → null
+ */
+function normalizeChannel(raw: unknown): AffiliateChannelKey | null {
   const s = String(raw ?? "")
     .trim()
     .toLowerCase();
   if (!s) return null;
   if (s === "twitter") return "x";
   if (isArenaPlatformKey(s)) return s;
-  return null;
+  if (s === "code" || s === "direct" || s === "referral") return CODE_CHANNEL;
+  return CODE_CHANNEL;
 }
 
-/**
- * Fetch `clicks_analytics` for an affiliate and group by platform.
- * Supports (a) aggregate rows with numeric `clicks` / `conversions`, or
- * (b) per-event rows with `eventType` / `type` of `click` | `conversion`.
- */
-export async function fetchClicksAnalyticsGrouped(
-  db: Firestore,
-  affiliateId: string
-): Promise<{
-  byPlatform: PlatformMetrics;
+export type GroupedAnalytics = {
+  byPlatform: ChannelMetrics;
   totalClicks: number;
   totalConversions: number;
-}> {
-  const q = query(
-    collection(db, "clicks_analytics"),
-    where("affiliateId", "==", affiliateId)
-  );
+};
 
-  const snap = await getDocs(q);
-  const byPlatform = emptyByPlatform();
+/** Group a `clicks_analytics` snapshot by channel (supports aggregate rows and per-event rows). */
+function groupSnapshot(snap: QuerySnapshot<DocumentData>): GroupedAnalytics {
+  const byPlatform = emptyByChannel();
   let totalClicks = 0;
   let totalConversions = 0;
 
   snap.forEach((docSnap) => {
     const d = docSnap.data() as Record<string, unknown>;
-    const platformRaw = d.platform ?? d.source;
-    const pk = normalizePlatform(platformRaw);
+    const pk = normalizeChannel(d.platform ?? d.source);
 
     const hasAggregate =
       typeof d.clicks === "number" ||
@@ -85,20 +104,40 @@ export async function fetchClicksAnalyticsGrouped(
     const kind = String(d.eventType ?? d.type ?? "")
       .trim()
       .toLowerCase();
-    if (!pk) return;
 
     if (kind === "click" || kind === "clicks") {
-      byPlatform[pk].clicks += 1;
       totalClicks += 1;
+      if (pk) byPlatform[pk].clicks += 1;
     } else if (
       kind === "conversion" ||
       kind === "conversions" ||
       kind === "convert"
     ) {
-      byPlatform[pk].conversions += 1;
       totalConversions += 1;
+      if (pk) byPlatform[pk].conversions += 1;
     }
   });
 
   return { byPlatform, totalClicks, totalConversions };
+}
+
+/**
+ * Subscribe to an affiliate's `clicks_analytics` in real time, grouped by channel.
+ * Returns an unsubscribe function.
+ */
+export function subscribeClicksAnalyticsGrouped(
+  db: Firestore,
+  affiliateId: string,
+  onData: (result: GroupedAnalytics) => void,
+  onError?: (err: Error) => void
+): () => void {
+  const q = query(
+    collection(db, "clicks_analytics"),
+    where("affiliateId", "==", affiliateId)
+  );
+  return onSnapshot(
+    q,
+    (snap) => onData(groupSnapshot(snap)),
+    (err) => onError?.(err)
+  );
 }

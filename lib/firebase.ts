@@ -83,10 +83,13 @@ export function getFirebaseClients(): FirebaseClients | null {
 
   const app = getApps().length > 0 ? getApp() : initializeApp(config);
 
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+
   _clients = {
     app,
-    auth: getAuth(app),
-    db: getFirestore(app),
+    auth,
+    db,
     analytics: null,
   };
 

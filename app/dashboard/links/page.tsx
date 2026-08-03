@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Check,
   Copy,
@@ -27,7 +27,12 @@ import { Input } from "@/components/ui/input";
 import { useAuth } from "@/context/AuthContext";
 import { buildArenaJoinUrl } from "@/lib/arena";
 import { ARENA_JOIN_PATH_LABEL } from "@/lib/branding";
-import { fetchClicksAnalyticsGrouped } from "@/lib/clicks-analytics";
+import {
+  subscribeClicksAnalyticsGrouped,
+  AFFILIATE_CHANNEL_KEYS,
+  AFFILIATE_CHANNEL_LABELS,
+  type GroupedAnalytics,
+} from "@/lib/clicks-analytics";
 import { resolveAffiliateReferralCode } from "@/lib/referral";
 import {
   ARENA_PLATFORM_KEYS,
@@ -109,15 +114,16 @@ export default function DashboardLinksPage() {
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
 
-  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const [byPlatform, setByPlatform] = useState<
-    Awaited<ReturnType<typeof fetchClicksAnalyticsGrouped>>["byPlatform"] | null
+    GroupedAnalytics["byPlatform"] | null
   >(null);
   const [totalClicks, setTotalClicks] = useState(0);
   const [totalConversions, setTotalConversions] = useState(0);
 
-  const refreshAnalytics = useCallback(async () => {
+  // Realtime: dashboard reflects new clicks/conversions instantly.
+  useEffect(() => {
     if (!uid) return;
     const clients = getFirebaseClients();
     if (!clients) {
@@ -126,30 +132,23 @@ export default function DashboardLinksPage() {
     }
     setAnalyticsLoading(true);
     setAnalyticsError(null);
-    try {
-      const result = await fetchClicksAnalyticsGrouped(clients.db, uid);
-      setByPlatform(result.byPlatform);
-      setTotalClicks(result.totalClicks);
-      setTotalConversions(result.totalConversions);
-    } catch (e) {
-      console.error(e);
-      setAnalyticsError(
-        e instanceof Error ? e.message : "Failed to load analytics."
-      );
-      setByPlatform(null);
-      setTotalClicks(0);
-      setTotalConversions(0);
-    } finally {
-      setAnalyticsLoading(false);
-    }
+    const unsubscribe = subscribeClicksAnalyticsGrouped(
+      clients.db,
+      uid,
+      (result) => {
+        setByPlatform(result.byPlatform);
+        setTotalClicks(result.totalClicks);
+        setTotalConversions(result.totalConversions);
+        setAnalyticsLoading(false);
+      },
+      (e) => {
+        console.error(e);
+        setAnalyticsError(e.message || "Failed to load analytics.");
+        setAnalyticsLoading(false);
+      }
+    );
+    return () => unsubscribe();
   }, [uid]);
-
-  useEffect(() => {
-    if (!uid) return;
-    queueMicrotask(() => {
-      void refreshAnalytics();
-    });
-  }, [uid, refreshAnalytics]);
 
   function generateLink() {
     if (!referralCode) return;
@@ -182,7 +181,7 @@ export default function DashboardLinksPage() {
         <h2 className="mt-2 text-2xl font-semibold text-white">Links & analytics</h2>
         <p className="mt-2 max-w-2xl text-sm text-zinc-500">
           Share your standalone referral code or per-channel Arena join URLs. The same code powers{" "}
-          <code className="font-mono text-zinc-400">ref=</code> on every generated link. Analytics
+          <code className="font-mono text-zinc-400">aff=</code> on every generated link. Analytics
           pull from <code className="text-zinc-400">clicks_analytics</code> for your affiliate ID.
         </p>
       </div>
@@ -238,7 +237,7 @@ export default function DashboardLinksPage() {
           <CardDescription>
             Generates{" "}
             <code className="font-mono text-zinc-400">
-              {ARENA_JOIN_PATH_LABEL}?ref=YOUR_CODE&source=…
+              {ARENA_JOIN_PATH_LABEL}?aff=YOUR_CODE&source=…
             </code>{" "}
             using the referral code above.
           </CardDescription>
@@ -312,21 +311,16 @@ export default function DashboardLinksPage() {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <TabsList className="w-full sm:w-auto">
             <TabsTrigger value="all">All channels</TabsTrigger>
-            {ARENA_PLATFORM_KEYS.map((key) => (
+            {AFFILIATE_CHANNEL_KEYS.map((key) => (
               <TabsTrigger key={key} value={key}>
-                {ARENA_PLATFORM_LABELS[key]}
+                {AFFILIATE_CHANNEL_LABELS[key]}
               </TabsTrigger>
             ))}
           </TabsList>
-          <Button
-            type="button"
-            variant="secondary"
-            className="text-xs"
-            onClick={() => void refreshAnalytics()}
-            disabled={analyticsLoading || !uid}
-          >
-            Refresh data
-          </Button>
+          <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400/90">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+            Live
+          </span>
         </div>
 
         {analyticsError ? (
@@ -359,16 +353,22 @@ export default function DashboardLinksPage() {
           </Card>
         </TabsContent>
 
-        {ARENA_PLATFORM_KEYS.map((key) => (
+        {AFFILIATE_CHANNEL_KEYS.map((key) => (
           <TabsContent key={key} value={key}>
             <Card className="border-white/10">
               <CardHeader>
                 <CardTitle className="text-base">
-                  {ARENA_PLATFORM_LABELS[key]}
+                  {AFFILIATE_CHANNEL_LABELS[key]}
                 </CardTitle>
                 <CardDescription>
-                  Events where <code className="text-zinc-500">platform</code> /{" "}
-                  <code className="text-zinc-500">source</code> resolves to this channel.
+                  {key === "code" ? (
+                    <>Signups where a partner&apos;s referral code was entered manually.</>
+                  ) : (
+                    <>
+                      Events where <code className="text-zinc-500">platform</code> /{" "}
+                      <code className="text-zinc-500">source</code> resolves to this channel.
+                    </>
+                  )}
                 </CardDescription>
               </CardHeader>
               <CardContent>
