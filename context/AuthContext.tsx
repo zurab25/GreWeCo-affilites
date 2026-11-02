@@ -33,12 +33,23 @@ import {
 import { getFirebaseClients, isFirebaseConfigured } from "@/lib/firebase";
 import { generateReferralId } from "@/lib/utils";
 
+const AFFILIATES_API_BASE =
+  typeof window !== "undefined"
+    ? window.location.origin
+    : "https://affiliates.grew.eco";
+
 export type UserProfile = {
   referralId: string;
   displayName: string | null;
   createdAt?: unknown;
   role?: string;
-  earnings?: { directBonus?: number };
+  earnings?: {
+    directBonus?: number;
+    pendingFirstSale?: number;
+    pendingCarbon?: number;
+    pendingTimber?: number;
+    paidOut?: number;
+  };
   stats?: {
     clicks: number;
     conversions: number;
@@ -108,7 +119,13 @@ async function loadOrBootstrapUserProfile(
         displayName: (d.displayName as string | null) ?? displayName,
         email: email ?? d.email,
         createdAt: d.createdAt ?? serverTimestamp(),
-        earnings: { directBonus: 0 },
+        earnings: {
+          directBonus: 0,
+          pendingFirstSale: 0,
+          pendingCarbon: 0,
+          pendingTimber: 0,
+          paidOut: 0,
+        },
         stats:
           d.stats ?? { clicks: 0, conversions: 0, earningsUsd: 0 },
       });
@@ -124,7 +141,13 @@ async function loadOrBootstrapUserProfile(
       displayName,
       email,
       createdAt: serverTimestamp(),
-      earnings: { directBonus: 0 },
+      earnings: {
+        directBonus: 0,
+        pendingFirstSale: 0,
+        pendingCarbon: 0,
+        pendingTimber: 0,
+        paidOut: 0,
+      },
       stats: { clicks: 0, conversions: 0, earningsUsd: 0 },
     });
     snap = await getDoc(userRef);
@@ -207,6 +230,74 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         throw new Error("Invite code is required.");
       }
 
+      let cred;
+      try {
+        cred = await createUserWithEmailAndPassword(
+          clients.auth,
+          email,
+          password
+        );
+      } catch (e) {
+        if (e instanceof Error) {
+          if (e.message.includes("email-already-in-use")) {
+            throw new Error("This email is already registered. Try signing in instead.");
+          }
+          if (e.message.includes("weak-password")) {
+            throw new Error("Password is too weak. Use at least 6 characters.");
+          }
+          if (e.message.includes("invalid-email")) {
+            throw new Error("Please enter a valid email address.");
+          }
+        }
+        throw e instanceof Error ? e : new Error("Registration failed.");
+      }
+
+      const uid = cred.user.uid;
+
+      try {
+        const idToken = await cred.user.getIdToken();
+        const response = await fetch(`${AFFILIATES_API_BASE}/api/partner-registration`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            uid,
+            email: cred.user.email,
+            displayName,
+            inviteCode: trimmed,
+            idToken,
+          }),
+        });
+
+        if (response.ok) {
+          return;
+        }
+
+        const errorData = await response.json().catch(() => ({}));
+        const errorCode = (errorData as { code?: string }).code;
+        const errorMessage = (errorData as { error?: string }).error;
+
+        if (errorCode === "INVALID_INVITE" || errorCode === "INVITE_USED") {
+          throw new Error(errorMessage || INVITE_ERR);
+        }
+
+        if (response.status === 403) {
+          console.warn("Server registration returned 403, falling back to client-side");
+        } else if (response.status >= 400 && response.status < 500) {
+          throw new Error(errorMessage || "Registration failed. Please check your invite code.");
+        } else {
+          console.warn("Server registration failed, falling back to client-side:", errorMessage);
+        }
+      } catch (e) {
+        if (e instanceof Error && (
+          e.message.includes("invite") ||
+          e.message.includes("Invite") ||
+          e.message.includes("Registration failed")
+        )) {
+          throw e;
+        }
+        console.warn("Server registration unavailable, using client-side fallback:", e);
+      }
+
       const inviteSnap = await getDocs(
         query(
           collection(clients.db, "invites"),
@@ -225,18 +316,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         throw new Error(INVITE_ERR);
       }
 
-      let cred;
-      try {
-        cred = await createUserWithEmailAndPassword(
-          clients.auth,
-          email,
-          password
-        );
-      } catch (e) {
-        throw e instanceof Error ? e : new Error("Registration failed.");
-      }
-
-      const uid = cred.user.uid;
       const referralId = generateReferralId();
 
       const batch = writeBatch(clients.db);
@@ -246,7 +325,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         email: cred.user.email,
         referralId,
         createdAt: serverTimestamp(),
-        earnings: { directBonus: 0 },
+        earnings: {
+          directBonus: 0,
+          pendingFirstSale: 0,
+          pendingCarbon: 0,
+          pendingTimber: 0,
+          paidOut: 0,
+        },
         stats: { clicks: 0, conversions: 0, earningsUsd: 0 },
       });
       batch.update(inviteDoc.ref, {
@@ -258,9 +343,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         await batch.commit();
       } catch (e) {
-        console.error(e);
+        console.error("Client-side registration failed:", e);
         throw new Error(
-          "Account created but invite could not be marked as used. Contact support with your email."
+          "Account created but profile setup failed. Please contact support with your email."
         );
       }
     },

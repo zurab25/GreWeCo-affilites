@@ -182,7 +182,7 @@ export default function DashboardLinksPage() {
         <h2 className="mt-2 text-2xl font-semibold text-white">Links & analytics</h2>
         <p className="mt-2 max-w-2xl text-sm text-zinc-500">
           Share your standalone referral code or per-channel Arena join URLs. The same code powers{" "}
-          <code className="font-mono text-zinc-400">ref=</code> on every generated link. Analytics
+          <code className="font-mono text-zinc-400">aff=</code> on every generated link. Analytics
           pull from <code className="text-zinc-400">clicks_analytics</code> for your affiliate ID.
         </p>
       </div>
@@ -238,7 +238,7 @@ export default function DashboardLinksPage() {
           <CardDescription>
             Generates{" "}
             <code className="font-mono text-zinc-400">
-              {ARENA_JOIN_PATH_LABEL}?ref=YOUR_CODE&source=…
+              {ARENA_JOIN_PATH_LABEL}?aff=YOUR_CODE&source=…
             </code>{" "}
             using the referral code above.
           </CardDescription>
