@@ -45,19 +45,74 @@ Required for API routes (`/api/partner-registration`, `/api/link-event`):
 - `FIREBASE_PROJECT_ID` — same as `NEXT_PUBLIC_FIREBASE_PROJECT_ID`
 - `FIREBASE_CLIENT_EMAIL` — service account email (e.g., `firebase-adminsdk-xxxxx@greweco-bf4e0.iam.gserviceaccount.com`)
 - `FIREBASE_PRIVATE_KEY` — service account private key (with `\n` escaped)
-- `LINK_EVENT_HMAC_SECRET` — shared secret for server-to-server calls (generate with `openssl rand -hex 32`)
+- `LINK_EVENT_HMAC_SECRET` — shared secret for server-to-server calls
 
-**To set in Cloud Run:**
+### Setting up LINK_EVENT_HMAC_SECRET with Secret Manager
+
+**Step 1: Create the secret in Secret Manager:**
+```bash
+# Generate a secure secret
+openssl rand -hex 32 > /tmp/hmac-secret.txt
+
+# Create the secret in Secret Manager
+gcloud secrets create LINK_EVENT_HMAC_SECRET \
+  --project=greweco-bf4e0 \
+  --replication-policy="automatic"
+
+# Add the secret value
+gcloud secrets versions add LINK_EVENT_HMAC_SECRET \
+  --project=greweco-bf4e0 \
+  --data-file=/tmp/hmac-secret.txt
+
+# Clean up
+rm /tmp/hmac-secret.txt
+```
+
+**Step 2: Grant Cloud Run access to the secret:**
+```bash
+# Get the Cloud Run service account (usually the compute default)
+SERVICE_ACCOUNT=$(gcloud run services describe affiliates-greweco \
+  --region=us-central1 \
+  --project=greweco-bf4e0 \
+  --format='value(spec.template.spec.serviceAccountName)')
+
+# If empty, it uses the default compute service account
+if [ -z "$SERVICE_ACCOUNT" ]; then
+  PROJECT_NUMBER=$(gcloud projects describe greweco-bf4e0 --format='value(projectNumber)')
+  SERVICE_ACCOUNT="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+fi
+
+# Grant access
+gcloud secrets add-iam-policy-binding LINK_EVENT_HMAC_SECRET \
+  --project=greweco-bf4e0 \
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+**Step 3: Mount the secret in Cloud Run:**
 ```bash
 gcloud run services update affiliates-greweco \
   --region=us-central1 \
-  --set-env-vars="FIREBASE_PROJECT_ID=greweco-bf4e0,FIREBASE_CLIENT_EMAIL=...,LINK_EVENT_HMAC_SECRET=..." \
+  --project=greweco-bf4e0 \
+  --set-secrets="LINK_EVENT_HMAC_SECRET=LINK_EVENT_HMAC_SECRET:latest"
+```
+
+**Step 4: Share the same secret with Arena Functions:**
+Arena's `affiliateConversion.js` uses `defineSecret("LINK_EVENT_HMAC_SECRET")`.
+Ensure both services read from the same Secret Manager secret.
+
+**Alternative: Plain environment variable (less secure):**
+```bash
+gcloud run services update affiliates-greweco \
+  --region=us-central1 \
+  --set-env-vars="LINK_EVENT_HMAC_SECRET=$(openssl rand -hex 32)" \
   --project=greweco-bf4e0
 ```
 
 **Or via Console:**
 1. Cloud Run → Select service → Edit & Deploy New Revision
-2. Add environment variables under **Variables & Secrets**
+2. Under **Variables & Secrets**, click **Reference a Secret**
+3. Select `LINK_EVENT_HMAC_SECRET` and mount as environment variable
 
 ## Firestore Collections
 
@@ -68,34 +123,14 @@ The app uses these collections:
 - `clicks_analytics` — click and conversion events
 - `commissions` — commission ledger entries (doc ID = `commission-{orderId}` for idempotency)
 - `affiliateConversions` — outbox for Arena-to-affiliates conversion delivery (server-only)
+- `fiatOrders` — Arena order records (read by `/api/link-event` for conversion validation)
+- `solanaOrders` — Solana payment records (read for cluster validation)
 
-### Firestore Rules
+### Firestore Rules and Indexes
 
-The rules are in `firestore.rules`. Since both Arena and Affiliates share the same Firebase project (`greweco-bf4e0`), these rules must be **merged with Arena's rules** before deployment.
-
-Key rules:
-- Affiliates can read their own `commissions` and `clicks_analytics` (where `affiliateId == uid`)
-- All writes are server-only via Admin SDK
-- `affiliateConversions` is fully locked (server-side outbox)
-
-### Firestore Indexes
-
-Required composite index for the earnings dashboard (in `firestore.indexes.json`):
-
-```json
-{
-  "collectionGroup": "commissions",
-  "fields": [
-    { "fieldPath": "affiliateId", "order": "ASCENDING" },
-    { "fieldPath": "createdAt", "order": "DESCENDING" }
-  ]
-}
-```
-
-Deploy indexes:
-```bash
-firebase deploy --only firestore:indexes
-```
+**Important:** Arena owns the shared Firebase project's rules and indexes.
+The required rules and indexes are documented in `arena-rules-additions.md`.
+The Arena team must add them to their `firestore.rules` and `firestore.indexes.json`.
 
 ## Deployment Steps
 
@@ -144,48 +179,35 @@ Arena must change its code to persist the affiliate attribution on orders. Curre
      };
      ```
 
-3. **In order fulfillment (`fulfillVerifiedFiatOrder`, `fulfillSolanaPurchase`):**
-   - After successful payment verification
-   - Read `affiliateId` from the order document
-   - If present, POST conversion event with HMAC authentication:
+3. **In order fulfillment** — Arena's `affiliateConversion.js` handles this automatically:
+   - Triggers on `fiatOrders/{orderId}` transition to `status: "completed"`
+   - Reads `affiliate.code` from the order (set by `resolveAffiliateForOrder`)
+   - Validates: not testMode, mainnet cluster for Solana, not self-referral
+   - Sends conversion with HMAC in **headers** (not body):
      ```javascript
-     import { createHmac } from 'crypto';
-
-     async function postConversion(order) {
-       if (!order.affiliateId) return;
-
-       const HMAC_SECRET = process.env.LINK_EVENT_HMAC_SECRET;
-       const timestamp = Date.now();
-
-       // Build signature: eventType|affiliateId|orderId|buyerId|timestamp
-       const dataToSign = [
-         'conversion',
-         order.affiliateId,
-         order.id,
-         order.userId || '',
-         timestamp.toString(),
-       ].join('|');
-
-       const hmacSignature = createHmac('sha256', HMAC_SECRET)
-         .update(dataToSign)
-         .digest('hex');
-
-       await fetch('https://affiliates.grew.eco/api/link-event', {
-         method: 'POST',
-         headers: { 'Content-Type': 'application/json' },
-         body: JSON.stringify({
-           eventType: 'conversion',
-           affiliateId: order.affiliateId,
-           source: order.affiliateSource,
-           orderId: order.id,
-           buyerId: order.userId,
-           timestamp,
-           hmacSignature,
-         }),
-       });
+     // Arena sends (affiliateConversion.js):
+     const timestamp = Math.floor(Date.now() / 1000); // UNIX SECONDS
+     const body = JSON.stringify({
+       eventType: 'conversion',
+       affiliateId: order.affiliate.code,
+       orderId: orderId,
+       buyerId: order.userId,
+       timestamp: timestamp,
+     });
+     
+     // Signature format: eventType|affiliateId|orderId|buyerId|timestamp
+     const dataToSign = `conversion|${code}|${orderId}|${buyerId}|${timestamp}`;
+     const signature = createHmac('sha256', secret).update(dataToSign).digest('hex');
+     
+     // Headers (signature in header, NOT in body):
+     headers: {
+       'Content-Type': 'application/json',
+       'X-Grew-Timestamp': String(timestamp),  // UNIX seconds
+       'X-Grew-Signature': signature,          // hex HMAC
      }
      ```
-   - **Important:** The `orderAmountUsd` is now read from the order document in Firestore, not from the request body. This prevents forged commission amounts.
+   - **Order amount** is read from `fiatOrders/{orderId}.totalAmountUsd`, not from request
+   - **Affiliate code validation**: request `affiliateId` must match `order.affiliate.code`
 
 4. **Referral URL format:**
    - Use `?aff=` parameter (not `?ref=`)
@@ -204,38 +226,59 @@ Arena must change its code to persist the affiliate attribution on orders. Curre
 }
 ```
 
+#### Code Check Events (validate affiliate code)
+```json
+{
+  "eventType": "code_check",
+  "affiliateId": "REFERRAL_CODE"
+}
+```
+Response: `{ "valid": true, "affiliateId": "REFERRAL_CODE" }`
+
 #### Conversion Events (server-to-server only, requires authentication)
+
+**Request body:**
 ```json
 {
   "eventType": "conversion",
   "affiliateId": "REFERRAL_CODE",
   "orderId": "ORDER_ID",
   "buyerId": "BUYER_UID",
-  "timestamp": 1699000000000,
-  "hmacSignature": "hex-encoded-sha256-hmac"
+  "timestamp": 1730700000
 }
 ```
 
-**Authentication (conversions only):**
-- Option 1: Firebase ID token from a service account or `@grew.eco` email
-- Option 2: HMAC signature with shared secret (`LINK_EVENT_HMAC_SECRET`)
+**Required headers:**
+- `X-Grew-Signature`: hex-encoded HMAC-SHA256 signature
+- `X-Grew-Timestamp`: Unix timestamp in **seconds** (same as body `timestamp`)
 
 **HMAC Signature Format:**
 ```
 HMAC-SHA256(key=LINK_EVENT_HMAC_SECRET, data="eventType|affiliateId|orderId|buyerId|timestamp")
 ```
 
+Example: `"conversion|ABC123|order-1|user-1|1730700000"`
+
+**Authentication (conversions only):**
+- Option 1: HMAC signature in `X-Grew-Signature` header with `X-Grew-Timestamp`
+- Option 2: Firebase ID token in `Authorization: Bearer <token>` header (requires `email_verified: true`)
+
 **Security Features:**
 - CORS restricted to `arena.grew.eco` and `affiliates.grew.eco`
+- CORS allows headers: `Content-Type`, `Authorization`, `X-Grew-Signature`, `X-Grew-Timestamp`
 - Clicks: rate-limited to 10 per minute per IP+affiliate combination (see note below)
-- Conversions: require HMAC or ID token authentication
-- Order amount is fetched from Firestore (`orders`, `fiatOrders`, or `solanaOrders`)
+- Conversions: require HMAC (in headers) or ID token authentication
+- ID token path requires `email_verified: true`
+- Order amount is fetched from `fiatOrders/{orderId}.totalAmountUsd` only
+- Solana cluster is fetched from `solanaOrders/{solanaOrderId}.cluster`
+- Affiliate code validation: `affiliateId` must match `order.affiliate.code`
 - Commission doc ID is deterministic (`commission-{orderId}`) to prevent duplicates
 - Uses Firestore transaction to ensure at most one commission per order
-- Self-referral blocked: rejects when `affiliateUid === buyerId`
+- Self-referral blocked: rejects when `affiliateUid === orderUserId`
 - Test orders rejected: orders with `testMode: true` are not eligible
 - Devnet orders rejected: Solana orders must have `cluster: "mainnet-beta"` or `"mainnet"`
 - Affiliate role required: only users with `role: "affiliate"` can receive commissions
+- Order status must be exactly `"completed"` (not `fulfilled` or `paid`)
 
 **Rate Limiter Limitation:**
 The click rate limiter uses in-memory storage, which has these limitations:
@@ -247,24 +290,43 @@ For stricter rate limiting, consider a Firestore-backed or Redis-backed implemen
 The current implementation provides reasonable protection against casual abuse while
 keeping latency low for legitimate traffic.
 
-**Response:**
+**Response (new commission):**
 ```json
 {
   "success": true,
+  "duplicate": false,
   "eventType": "conversion",
+  "eventId": "analytics-doc-id",
   "affiliateId": "user-uid",
   "commissionId": "commission-ORDER_ID",
   "commissionAmountUsd": 6.50
 }
 ```
 
+**Response (duplicate/replay):**
+```json
+{
+  "success": true,
+  "duplicate": true,
+  "alreadyExists": true,
+  "eventId": "commission-ORDER_ID",
+  "commissionId": "commission-ORDER_ID"
+}
+```
+
 **Error Codes:**
 - `RATE_LIMITED` (429) — click rate limit exceeded
 - `AUTH_REQUIRED` (401) — conversion without valid authentication
+- `EMAIL_NOT_VERIFIED` (401) — ID token email not verified
+- `INVALID_TOKEN` (401) — ID token verification failed
 - `NOT_AFFILIATE` (403) — user exists but does not have `role: "affiliate"`
-- `ORDER_NOT_FOUND` (404) — order doesn't exist in any orders collection
-- `ORDER_NOT_COMPLETED` (400) — order status is not completed/fulfilled/paid
-- `INVALID_ORDER_AMOUNT` (400) — order has no valid totalUsd/amountUsd field
+- `AFFILIATE_NOT_FOUND` (404) — affiliate code not found
+- `ORDER_NOT_FOUND` (404) — order doesn't exist in `fiatOrders`
+- `SOLANA_ORDER_NOT_FOUND` (404) — Solana order record missing
+- `ORDER_NOT_COMPLETED` (400) — order status is not `"completed"`
+- `INVALID_ORDER_AMOUNT` (400) — order has no valid `totalAmountUsd` field
+- `NO_AFFILIATE_ON_ORDER` (400) — order has no `affiliate.code`
+- `AFFILIATE_MISMATCH` (400) — request `affiliateId` doesn't match order's code
 - `TEST_ORDER` (400) — order has `testMode: true`
 - `DEVNET_ORDER` (400) — Solana order is not on mainnet
 - `SELF_REFERRAL` (400) — buyer is the same as the affiliate

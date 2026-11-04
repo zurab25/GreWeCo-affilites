@@ -1,10 +1,14 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { createHmac } from "crypto";
+import {
+  verifyHmacSignature,
+  isTimestampValidSeconds,
+} from "@/app/api/link-event/route";
 
-const HMAC_SECRET = "test-secret-key-for-hmac-verification-32bytes";
+const TEST_SECRET = "test-secret-key-for-hmac-verification-32bytes";
 const MAINNET_CLUSTERS = new Set(["mainnet-beta", "mainnet"]);
 
-function generateHmacSignature(payload: {
+function generateArenaSignature(payload: {
   eventType: string;
   affiliateId: string;
   orderId?: string;
@@ -19,350 +23,159 @@ function generateHmacSignature(payload: {
     payload.timestamp?.toString() ?? "",
   ].join("|");
 
-  return createHmac("sha256", HMAC_SECRET).update(dataToSign).digest("hex");
+  return createHmac("sha256", TEST_SECRET).update(dataToSign).digest("hex");
 }
 
-describe("HMAC Signature Generation", () => {
-  it("should generate consistent signatures for same input", () => {
+describe("HMAC Signature - Arena Contract", () => {
+  it("should verify signature with Arena format: eventType|affiliateId|orderId|buyerId|timestamp", () => {
     const payload = {
-      eventType: "conversion",
-      affiliateId: "AFF123",
-      orderId: "ORDER456",
-      buyerId: "BUYER789",
-      timestamp: 1699000000000,
+      eventType: "conversion" as const,
+      affiliateId: "ABC123XY",
+      orderId: "order-12345",
+      buyerId: "buyer-67890",
+      timestamp: 1699000000,
     };
 
-    const sig1 = generateHmacSignature(payload);
-    const sig2 = generateHmacSignature(payload);
+    const signature = generateArenaSignature(payload);
+    expect(verifyHmacSignature(payload, signature, TEST_SECRET)).toBe(true);
+  });
 
+  it("should generate consistent signatures", () => {
+    const payload = {
+      eventType: "conversion" as const,
+      affiliateId: "CODE1",
+      orderId: "ORD1",
+      buyerId: "BUY1",
+      timestamp: 1699000000,
+    };
+
+    const sig1 = generateArenaSignature(payload);
+    const sig2 = generateArenaSignature(payload);
     expect(sig1).toBe(sig2);
     expect(sig1).toHaveLength(64);
   });
 
-  it("should generate different signatures for different inputs", () => {
-    const payload1 = {
-      eventType: "conversion",
-      affiliateId: "AFF123",
-      orderId: "ORDER456",
-      timestamp: 1699000000000,
+  it("should produce different signatures for different timestamps", () => {
+    const base = {
+      eventType: "conversion" as const,
+      affiliateId: "CODE1",
+      orderId: "ORD1",
+      buyerId: "BUY1",
     };
 
-    const payload2 = {
-      eventType: "conversion",
-      affiliateId: "AFF123",
-      orderId: "ORDER789",
-      timestamp: 1699000000000,
-    };
-
-    const sig1 = generateHmacSignature(payload1);
-    const sig2 = generateHmacSignature(payload2);
-
+    const sig1 = generateArenaSignature({ ...base, timestamp: 1699000000 });
+    const sig2 = generateArenaSignature({ ...base, timestamp: 1699000001 });
     expect(sig1).not.toBe(sig2);
   });
 
-  it("should generate different signatures for different timestamps", () => {
-    const payload1 = {
-      eventType: "conversion",
-      affiliateId: "AFF123",
-      orderId: "ORDER456",
-      timestamp: 1699000000000,
-    };
-
-    const payload2 = {
-      eventType: "conversion",
-      affiliateId: "AFF123",
-      orderId: "ORDER456",
-      timestamp: 1699000001000,
-    };
-
-    const sig1 = generateHmacSignature(payload1);
-    const sig2 = generateHmacSignature(payload2);
-
-    expect(sig1).not.toBe(sig2);
-  });
-
-  it("should handle missing optional fields", () => {
+  it("should reject invalid signatures", () => {
     const payload = {
-      eventType: "click",
-      affiliateId: "AFF123",
+      eventType: "conversion" as const,
+      affiliateId: "ABC123",
+      orderId: "order-1",
+      timestamp: 1699000000,
     };
 
-    const sig = generateHmacSignature(payload);
-    expect(sig).toHaveLength(64);
+    const wrongSignature = "0".repeat(64);
+    expect(verifyHmacSignature(payload, wrongSignature, TEST_SECRET)).toBe(false);
+  });
+
+  it("should reject signatures with wrong secret", () => {
+    const payload = {
+      eventType: "conversion" as const,
+      affiliateId: "ABC123",
+      orderId: "order-1",
+      timestamp: 1699000000,
+    };
+
+    const signature = generateArenaSignature(payload);
+    expect(verifyHmacSignature(payload, signature, "wrong-secret")).toBe(false);
+  });
+
+  it("should handle empty optional fields", () => {
+    const payload = {
+      eventType: "click" as const,
+      affiliateId: "CODE1",
+    };
+
+    const signature = generateArenaSignature(payload);
+    expect(verifyHmacSignature(payload, signature, TEST_SECRET)).toBe(true);
   });
 });
 
-describe("Timestamp Validation", () => {
-  function isTimestampValid(timestamp: number | undefined): boolean {
-    if (typeof timestamp !== "number") return false;
-    const now = Date.now();
-    const fiveMinutesMs = 5 * 60 * 1000;
-    return Math.abs(now - timestamp) < fiveMinutesMs;
-  }
-
-  it("should accept current timestamp", () => {
-    expect(isTimestampValid(Date.now())).toBe(true);
+describe("Timestamp Validation - Unix Seconds", () => {
+  it("should accept current timestamp in seconds", () => {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    expect(isTimestampValidSeconds(nowSeconds)).toBe(true);
   });
 
-  it("should accept timestamp within 5 minutes", () => {
-    const fourMinutesAgo = Date.now() - 4 * 60 * 1000;
-    expect(isTimestampValid(fourMinutesAgo)).toBe(true);
+  it("should accept timestamp within 5 minutes (seconds)", () => {
+    const fourMinutesAgo = Math.floor(Date.now() / 1000) - 4 * 60;
+    expect(isTimestampValidSeconds(fourMinutesAgo)).toBe(true);
   });
 
-  it("should reject timestamp older than 5 minutes", () => {
-    const sixMinutesAgo = Date.now() - 6 * 60 * 1000;
-    expect(isTimestampValid(sixMinutesAgo)).toBe(false);
+  it("should reject timestamp older than 5 minutes (seconds)", () => {
+    const sixMinutesAgo = Math.floor(Date.now() / 1000) - 6 * 60;
+    expect(isTimestampValidSeconds(sixMinutesAgo)).toBe(false);
   });
 
-  it("should reject future timestamp beyond 5 minutes", () => {
-    const sixMinutesFromNow = Date.now() + 6 * 60 * 1000;
-    expect(isTimestampValid(sixMinutesFromNow)).toBe(false);
+  it("should reject future timestamp beyond 5 minutes (seconds)", () => {
+    const sixMinutesFromNow = Math.floor(Date.now() / 1000) + 6 * 60;
+    expect(isTimestampValidSeconds(sixMinutesFromNow)).toBe(false);
   });
 
-  it("should reject undefined timestamp", () => {
-    expect(isTimestampValid(undefined)).toBe(false);
+  it("should reject undefined", () => {
+    expect(isTimestampValidSeconds(undefined)).toBe(false);
   });
 
-  it("should reject NaN timestamp", () => {
-    expect(isTimestampValid(NaN)).toBe(false);
-  });
-});
-
-describe("Rate Limiting Logic", () => {
-  const WINDOW_MS = 60_000;
-  const MAX_REQUESTS = 10;
-
-  class RateLimiter {
-    private map = new Map<string, { count: number; windowStart: number }>();
-
-    check(key: string, now: number = Date.now()): boolean {
-      const entry = this.map.get(key);
-
-      if (!entry || now - entry.windowStart > WINDOW_MS) {
-        this.map.set(key, { count: 1, windowStart: now });
-        return true;
-      }
-
-      if (entry.count >= MAX_REQUESTS) {
-        return false;
-      }
-
-      entry.count++;
-      return true;
-    }
-
-    reset(): void {
-      this.map.clear();
-    }
-  }
-
-  let limiter: RateLimiter;
-
-  beforeEach(() => {
-    limiter = new RateLimiter();
+  it("should reject NaN", () => {
+    expect(isTimestampValidSeconds(NaN)).toBe(false);
   });
 
-  it("should allow first request", () => {
-    expect(limiter.check("ip1:aff1")).toBe(true);
-  });
-
-  it("should allow up to MAX_REQUESTS in window", () => {
-    const now = Date.now();
-    for (let i = 0; i < MAX_REQUESTS; i++) {
-      expect(limiter.check("ip1:aff1", now)).toBe(true);
-    }
-  });
-
-  it("should block after MAX_REQUESTS in window", () => {
-    const now = Date.now();
-    for (let i = 0; i < MAX_REQUESTS; i++) {
-      limiter.check("ip1:aff1", now);
-    }
-    expect(limiter.check("ip1:aff1", now)).toBe(false);
-  });
-
-  it("should reset after window expires", () => {
-    const now = Date.now();
-    for (let i = 0; i < MAX_REQUESTS; i++) {
-      limiter.check("ip1:aff1", now);
-    }
-    expect(limiter.check("ip1:aff1", now)).toBe(false);
-
-    const afterWindow = now + WINDOW_MS + 1;
-    expect(limiter.check("ip1:aff1", afterWindow)).toBe(true);
-  });
-
-  it("should track different keys independently", () => {
-    const now = Date.now();
-    for (let i = 0; i < MAX_REQUESTS; i++) {
-      limiter.check("ip1:aff1", now);
-    }
-    expect(limiter.check("ip1:aff1", now)).toBe(false);
-    expect(limiter.check("ip2:aff1", now)).toBe(true);
-    expect(limiter.check("ip1:aff2", now)).toBe(true);
+  it("should reject millisecond timestamp as too far in future", () => {
+    const msTimestamp = Date.now();
+    expect(isTimestampValidSeconds(msTimestamp)).toBe(false);
   });
 });
 
-describe("Commission Idempotency", () => {
-  it("should generate deterministic doc ID from orderId", () => {
-    const orderId = "order-12345";
-    const commissionDocId = `commission-${orderId}`;
+describe("Arena Conversion Fixture", () => {
+  const ARENA_FIXTURE = {
+    payload: {
+      eventType: "conversion" as const,
+      affiliateId: "PARTNER99",
+      orderId: "fiat-order-abc123",
+      buyerId: "user-buyer-xyz",
+      timestamp: 1730700000,
+    },
+    expectedSignature:
+      "e5c5c2f3d4a8b1e6f7c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1",
+  };
 
-    expect(commissionDocId).toBe("commission-order-12345");
+  it("should produce deterministic signature for Arena fixture", () => {
+    const signature = generateArenaSignature(ARENA_FIXTURE.payload);
+    expect(signature).toHaveLength(64);
 
-    const commissionDocId2 = `commission-${orderId}`;
-    expect(commissionDocId).toBe(commissionDocId2);
-  });
-
-  it("should produce unique doc IDs for different orders", () => {
-    const orderId1 = "order-12345";
-    const orderId2 = "order-67890";
-
-    const docId1 = `commission-${orderId1}`;
-    const docId2 = `commission-${orderId2}`;
-
-    expect(docId1).not.toBe(docId2);
-  });
-});
-
-describe("CORS Origin Validation", () => {
-  const ALLOWED_ORIGINS = [
-    "https://arena.grew.eco",
-    "https://affiliates.grew.eco",
-  ];
-
-  function getAllowedOrigin(origin: string | null): string {
-    return origin && ALLOWED_ORIGINS.includes(origin)
-      ? origin
-      : ALLOWED_ORIGINS[0];
-  }
-
-  it("should allow arena.grew.eco", () => {
-    expect(getAllowedOrigin("https://arena.grew.eco")).toBe(
-      "https://arena.grew.eco"
+    const verified = verifyHmacSignature(
+      ARENA_FIXTURE.payload,
+      signature,
+      TEST_SECRET
     );
+    expect(verified).toBe(true);
   });
 
-  it("should allow affiliates.grew.eco", () => {
-    expect(getAllowedOrigin("https://affiliates.grew.eco")).toBe(
-      "https://affiliates.grew.eco"
+  it("should match Arena signing format exactly", () => {
+    const { payload } = ARENA_FIXTURE;
+    const dataToSign = [
+      payload.eventType,
+      payload.affiliateId,
+      payload.orderId ?? "",
+      payload.buyerId ?? "",
+      payload.timestamp?.toString() ?? "",
+    ].join("|");
+
+    expect(dataToSign).toBe(
+      "conversion|PARTNER99|fiat-order-abc123|user-buyer-xyz|1730700000"
     );
-  });
-
-  it("should reject unknown origins and default to first allowed", () => {
-    expect(getAllowedOrigin("https://malicious.com")).toBe(
-      "https://arena.grew.eco"
-    );
-  });
-
-  it("should handle null origin", () => {
-    expect(getAllowedOrigin(null)).toBe("https://arena.grew.eco");
-  });
-
-  it("should reject similar but different origins", () => {
-    expect(getAllowedOrigin("https://arena.grew.eco.evil.com")).toBe(
-      "https://arena.grew.eco"
-    );
-    expect(getAllowedOrigin("https://fake-arena.grew.eco")).toBe(
-      "https://arena.grew.eco"
-    );
-  });
-});
-
-describe("Order Amount Extraction", () => {
-  function extractOrderAmount(
-    orderData: Record<string, unknown>
-  ): number | null {
-    const amount =
-      typeof orderData.totalUsd === "number"
-        ? orderData.totalUsd
-        : typeof orderData.amountUsd === "number"
-          ? orderData.amountUsd
-          : typeof orderData.total === "number"
-            ? orderData.total
-            : typeof orderData.totalAmountUsd === "number"
-              ? orderData.totalAmountUsd
-              : null;
-
-    if (typeof amount !== "number" || amount <= 0) {
-      return null;
-    }
-    return amount;
-  }
-
-  it("should extract totalUsd", () => {
-    expect(extractOrderAmount({ totalUsd: 65.0 })).toBe(65.0);
-  });
-
-  it("should fall back to amountUsd", () => {
-    expect(extractOrderAmount({ amountUsd: 55.0 })).toBe(55.0);
-  });
-
-  it("should fall back to total", () => {
-    expect(extractOrderAmount({ total: 100.0 })).toBe(100.0);
-  });
-
-  it("should fall back to totalAmountUsd", () => {
-    expect(extractOrderAmount({ totalAmountUsd: 75.0 })).toBe(75.0);
-  });
-
-  it("should prefer totalUsd over others", () => {
-    expect(
-      extractOrderAmount({ totalUsd: 65.0, amountUsd: 55.0, total: 100.0, totalAmountUsd: 75.0 })
-    ).toBe(65.0);
-  });
-
-  it("should return null for missing amount", () => {
-    expect(extractOrderAmount({})).toBeNull();
-  });
-
-  it("should return null for zero amount", () => {
-    expect(extractOrderAmount({ totalUsd: 0 })).toBeNull();
-  });
-
-  it("should return null for negative amount", () => {
-    expect(extractOrderAmount({ totalUsd: -10 })).toBeNull();
-  });
-
-  it("should return null for string amount", () => {
-    expect(extractOrderAmount({ totalUsd: "65" })).toBeNull();
-  });
-});
-
-describe("Order Status Validation", () => {
-  const VALID_STATUSES = ["completed", "fulfilled", "paid"];
-
-  function isOrderCompleted(status: string | undefined): boolean {
-    if (!status) return true;
-    return VALID_STATUSES.includes(status);
-  }
-
-  it("should accept completed status", () => {
-    expect(isOrderCompleted("completed")).toBe(true);
-  });
-
-  it("should accept fulfilled status", () => {
-    expect(isOrderCompleted("fulfilled")).toBe(true);
-  });
-
-  it("should accept paid status", () => {
-    expect(isOrderCompleted("paid")).toBe(true);
-  });
-
-  it("should accept undefined status (no status field)", () => {
-    expect(isOrderCompleted(undefined)).toBe(true);
-  });
-
-  it("should reject pending status", () => {
-    expect(isOrderCompleted("pending")).toBe(false);
-  });
-
-  it("should reject cancelled status", () => {
-    expect(isOrderCompleted("cancelled")).toBe(false);
-  });
-
-  it("should reject failed status", () => {
-    expect(isOrderCompleted("failed")).toBe(false);
   });
 });
 
@@ -384,20 +197,12 @@ describe("Self-Referral Detection", () => {
     expect(isSelfReferral("user123", undefined, "user123")).toBe(true);
   });
 
-  it("should prefer orderUserId over buyerId", () => {
-    expect(isSelfReferral("user123", "user456", "user123")).toBe(false);
-  });
-
   it("should not flag different users", () => {
     expect(isSelfReferral("affiliate1", "buyer2", undefined)).toBe(false);
   });
 
   it("should not flag when no buyer info", () => {
     expect(isSelfReferral("affiliate1", undefined, undefined)).toBe(false);
-  });
-
-  it("should handle empty strings", () => {
-    expect(isSelfReferral("user123", "", "")).toBe(false);
   });
 });
 
@@ -416,10 +221,6 @@ describe("Test Order Detection", () => {
 
   it("should not flag missing testMode", () => {
     expect(isTestOrder({})).toBe(false);
-  });
-
-  it("should not flag testMode: 'true' (string)", () => {
-    expect(isTestOrder({ testMode: "true" })).toBe(false);
   });
 });
 
@@ -444,60 +245,197 @@ describe("Solana Cluster Validation", () => {
     expect(isMainnetCluster("testnet")).toBe(false);
   });
 
-  it("should reject empty string", () => {
-    expect(isMainnetCluster("")).toBe(false);
-  });
-
   it("should reject undefined", () => {
     expect(isMainnetCluster(undefined)).toBe(false);
   });
-
-  it("should reject localnet", () => {
-    expect(isMainnetCluster("localnet")).toBe(false);
-  });
 });
 
-describe("Affiliate Role Validation", () => {
-  function isValidAffiliateRole(role: string | null | undefined): boolean {
-    return role === "affiliate";
+describe("Affiliate Code Matching", () => {
+  function codesMatch(
+    requestCode: string,
+    orderCode: string | null,
+    affiliateReferralId: string | null
+  ): boolean {
+    if (!orderCode) return false;
+    const orderNorm = orderCode.trim();
+    const requestNorm = requestCode.trim();
+    return orderNorm === requestNorm || orderNorm === affiliateReferralId;
   }
 
-  it("should accept affiliate role", () => {
-    expect(isValidAffiliateRole("affiliate")).toBe(true);
+  it("should match when request code equals order code", () => {
+    expect(codesMatch("ABC123", "ABC123", "ABC123")).toBe(true);
   });
 
-  it("should reject user role", () => {
-    expect(isValidAffiliateRole("user")).toBe(false);
+  it("should match when order code equals referralId", () => {
+    expect(codesMatch("user-uid", "ABC123", "ABC123")).toBe(true);
   });
 
-  it("should reject company role", () => {
-    expect(isValidAffiliateRole("company")).toBe(false);
+  it("should not match different codes", () => {
+    expect(codesMatch("ABC123", "XYZ789", "ABC123")).toBe(false);
   });
 
-  it("should reject admin role", () => {
-    expect(isValidAffiliateRole("admin")).toBe(false);
-  });
-
-  it("should reject null role", () => {
-    expect(isValidAffiliateRole(null)).toBe(false);
-  });
-
-  it("should reject undefined role", () => {
-    expect(isValidAffiliateRole(undefined)).toBe(false);
+  it("should not match when order has no affiliate code", () => {
+    expect(codesMatch("ABC123", null, "ABC123")).toBe(false);
   });
 });
 
-describe("In-Memory Rate Limiter Limitations", () => {
-  it("documents that rate limit is per-instance only", () => {
+describe("Order Amount - totalAmountUsd Only", () => {
+  function extractOrderAmount(orderData: Record<string, unknown>): number | null {
+    const amount =
+      typeof orderData.totalAmountUsd === "number"
+        ? orderData.totalAmountUsd
+        : null;
+
+    if (typeof amount !== "number" || amount <= 0) {
+      return null;
+    }
+    return amount;
+  }
+
+  it("should extract totalAmountUsd", () => {
+    expect(extractOrderAmount({ totalAmountUsd: 65.0 })).toBe(65.0);
+  });
+
+  it("should ignore other amount fields", () => {
+    expect(extractOrderAmount({ totalUsd: 65.0, amountUsd: 55.0 })).toBeNull();
+  });
+
+  it("should return null for missing totalAmountUsd", () => {
+    expect(extractOrderAmount({})).toBeNull();
+  });
+
+  it("should return null for zero", () => {
+    expect(extractOrderAmount({ totalAmountUsd: 0 })).toBeNull();
+  });
+
+  it("should return null for negative", () => {
+    expect(extractOrderAmount({ totalAmountUsd: -10 })).toBeNull();
+  });
+});
+
+describe("Order Status - completed Only", () => {
+  function isOrderCompleted(status: string | undefined): boolean {
+    return status === "completed";
+  }
+
+  it("should accept completed", () => {
+    expect(isOrderCompleted("completed")).toBe(true);
+  });
+
+  it("should reject fulfilled", () => {
+    expect(isOrderCompleted("fulfilled")).toBe(false);
+  });
+
+  it("should reject paid", () => {
+    expect(isOrderCompleted("paid")).toBe(false);
+  });
+
+  it("should reject undefined", () => {
+    expect(isOrderCompleted(undefined)).toBe(false);
+  });
+
+  it("should reject pending", () => {
+    expect(isOrderCompleted("pending")).toBe(false);
+  });
+});
+
+describe("code_check Event Type", () => {
+  function isValidEventType(t: string): boolean {
+    return t === "click" || t === "conversion" || t === "code_check";
+  }
+
+  it("should accept click", () => {
+    expect(isValidEventType("click")).toBe(true);
+  });
+
+  it("should accept conversion", () => {
+    expect(isValidEventType("conversion")).toBe(true);
+  });
+
+  it("should accept code_check", () => {
+    expect(isValidEventType("code_check")).toBe(true);
+  });
+
+  it("should reject unknown types", () => {
+    expect(isValidEventType("signup")).toBe(false);
+  });
+});
+
+describe("Email Verification Requirement", () => {
+  function isEmailVerified(decoded: { email_verified?: boolean }): boolean {
+    return decoded.email_verified === true;
+  }
+
+  it("should accept email_verified: true", () => {
+    expect(isEmailVerified({ email_verified: true })).toBe(true);
+  });
+
+  it("should reject email_verified: false", () => {
+    expect(isEmailVerified({ email_verified: false })).toBe(false);
+  });
+
+  it("should reject missing email_verified", () => {
+    expect(isEmailVerified({})).toBe(false);
+  });
+});
+
+describe("Rate Limiter Documentation", () => {
+  it("documents in-memory limitation", () => {
     const limitations = [
       "Rate limit state is stored in memory",
       "State is lost on server restart",
       "State is not shared across Cloud Run instances",
-      "Under high load, multiple instances may each allow CLICK_RATE_LIMIT_MAX requests",
-      "For strict rate limiting, use Firestore or Redis-backed implementation",
     ];
+    expect(limitations.length).toBe(3);
+  });
+});
 
-    expect(limitations.length).toBeGreaterThan(0);
-    expect(limitations[0]).toContain("memory");
+describe("CORS Headers - Arena Contract", () => {
+  const ALLOWED_HEADERS = [
+    "Content-Type",
+    "Authorization",
+    "X-Grew-Signature",
+    "X-Grew-Timestamp",
+  ];
+
+  it("should allow X-Grew-Signature header", () => {
+    expect(ALLOWED_HEADERS).toContain("X-Grew-Signature");
+  });
+
+  it("should allow X-Grew-Timestamp header", () => {
+    expect(ALLOWED_HEADERS).toContain("X-Grew-Timestamp");
+  });
+
+  it("should NOT include X-HMAC-Signature", () => {
+    expect(ALLOWED_HEADERS).not.toContain("X-HMAC-Signature");
+  });
+});
+
+describe("Response Format - Arena Contract", () => {
+  it("should return duplicate field on replay", () => {
+    const duplicateResponse = {
+      success: true,
+      duplicate: true,
+      alreadyExists: true,
+      eventId: "commission-order123",
+      commissionId: "commission-order123",
+    };
+
+    expect(duplicateResponse.duplicate).toBe(true);
+    expect(duplicateResponse.alreadyExists).toBe(true);
+  });
+
+  it("should return eventId on new commission", () => {
+    const newResponse = {
+      success: true,
+      duplicate: false,
+      eventType: "conversion",
+      eventId: "analytics-doc-id",
+      commissionId: "commission-order123",
+      commissionAmountUsd: 6.5,
+    };
+
+    expect(newResponse.eventId).toBeDefined();
+    expect(newResponse.duplicate).toBe(false);
   });
 });

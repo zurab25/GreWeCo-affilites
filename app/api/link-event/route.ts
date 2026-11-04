@@ -8,7 +8,7 @@ import { ARENA_PLATFORM_KEYS } from "@/lib/platforms";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type EventType = "click" | "conversion";
+type EventType = "click" | "conversion" | "code_check";
 
 type LinkEventPayload = {
   eventType: EventType;
@@ -17,13 +17,11 @@ type LinkEventPayload = {
   platform?: string;
   buyerId?: string;
   orderId?: string;
-  idToken?: string;
-  hmacSignature?: string;
   timestamp?: number;
 };
 
 function isValidEventType(t: unknown): t is EventType {
-  return t === "click" || t === "conversion";
+  return t === "click" || t === "conversion" || t === "code_check";
 }
 
 function normalizePlatform(raw: unknown): string | null {
@@ -46,7 +44,7 @@ function isValidPayload(body: unknown): body is LinkEventPayload {
   );
 }
 
-const FIRST_SALE_COMMISSION_RATE = 0.10;
+const FIRST_SALE_COMMISSION_RATE = 0.1;
 
 const HMAC_SECRET = process.env.LINK_EVENT_HMAC_SECRET;
 
@@ -60,14 +58,16 @@ const CLICK_RATE_LIMIT_MAX = 10;
 
 const MAINNET_CLUSTERS = new Set(["mainnet-beta", "mainnet"]);
 
-const clickRateLimitMap = new Map<string, { count: number; windowStart: number }>();
+const clickRateLimitMap = new Map<
+  string,
+  { count: number; windowStart: number }
+>();
 
-function verifyHmacSignature(
+export function verifyHmacSignature(
   payload: LinkEventPayload,
-  signature: string
+  signature: string,
+  secret: string
 ): boolean {
-  if (!HMAC_SECRET) return false;
-
   const dataToSign = [
     payload.eventType,
     payload.affiliateId,
@@ -76,9 +76,7 @@ function verifyHmacSignature(
     payload.timestamp?.toString() ?? "",
   ].join("|");
 
-  const expectedSig = createHmac("sha256", HMAC_SECRET)
-    .update(dataToSign)
-    .digest("hex");
+  const expectedSig = createHmac("sha256", secret).update(dataToSign).digest("hex");
 
   try {
     return timingSafeEqual(
@@ -90,11 +88,13 @@ function verifyHmacSignature(
   }
 }
 
-function isTimestampValid(timestamp: number | undefined): boolean {
-  if (typeof timestamp !== "number") return false;
-  const now = Date.now();
-  const fiveMinutesMs = 5 * 60 * 1000;
-  return Math.abs(now - timestamp) < fiveMinutesMs;
+export function isTimestampValidSeconds(timestampSeconds: number | undefined): boolean {
+  if (typeof timestampSeconds !== "number" || !Number.isFinite(timestampSeconds)) {
+    return false;
+  }
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const fiveMinutesSeconds = 5 * 60;
+  return Math.abs(nowSeconds - timestampSeconds) < fiveMinutesSeconds;
 }
 
 function checkClickRateLimit(key: string): boolean {
@@ -121,7 +121,8 @@ function getCorsHeaders(origin: string | null): Record<string, string> {
   return {
     "Access-Control-Allow-Origin": allowedOrigin,
     "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-HMAC-Signature",
+    "Access-Control-Allow-Headers":
+      "Content-Type, Authorization, X-Grew-Signature, X-Grew-Timestamp",
     "Access-Control-Allow-Credentials": "true",
   };
 }
@@ -129,6 +130,9 @@ function getCorsHeaders(origin: string | null): Record<string, string> {
 export async function POST(request: NextRequest) {
   const origin = request.headers.get("origin");
   const corsHeaders = getCorsHeaders(origin);
+
+  const xGrewSignature = request.headers.get("x-grew-signature");
+  const xGrewTimestamp = request.headers.get("x-grew-timestamp");
 
   let body: unknown;
   try {
@@ -147,19 +151,53 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const {
-    eventType,
-    affiliateId,
-    source,
-    platform,
-    buyerId,
-    orderId,
-    idToken,
-    hmacSignature,
-    timestamp,
-  } = body;
+  const { eventType, affiliateId, source, platform, buyerId, orderId, timestamp } =
+    body;
 
   const db = getAdminFirestore();
+
+  const userQuery = await db
+    .collection("users")
+    .where("referralId", "==", affiliateId.trim())
+    .limit(1)
+    .get();
+
+  let affiliateUid: string | null = null;
+  let affiliateRole: string | null = null;
+  let affiliateReferralId: string | null = null;
+
+  if (!userQuery.empty) {
+    const doc = userQuery.docs[0];
+    affiliateUid = doc.id;
+    affiliateRole = (doc.data().role as string) ?? null;
+    affiliateReferralId = (doc.data().referralId as string) ?? null;
+  } else {
+    const userByUidDoc = await db.collection("users").doc(affiliateId).get();
+    if (userByUidDoc.exists) {
+      affiliateUid = affiliateId;
+      affiliateRole = (userByUidDoc.data()?.role as string) ?? null;
+      affiliateReferralId = (userByUidDoc.data()?.referralId as string) ?? null;
+    }
+  }
+
+  if (eventType === "code_check") {
+    const valid = affiliateUid !== null && affiliateRole === "affiliate";
+    return NextResponse.json({ valid, affiliateId }, { headers: corsHeaders });
+  }
+
+  if (!affiliateUid) {
+    return NextResponse.json(
+      { error: "Affiliate not found", code: "AFFILIATE_NOT_FOUND" },
+      { status: 404, headers: corsHeaders }
+    );
+  }
+
+  if (affiliateRole !== "affiliate") {
+    return NextResponse.json(
+      { error: "User is not a registered affiliate", code: "NOT_AFFILIATE" },
+      { status: 403, headers: corsHeaders }
+    );
+  }
 
   if (eventType === "conversion") {
     if (!orderId) {
@@ -170,11 +208,21 @@ export async function POST(request: NextRequest) {
     }
 
     let isAuthenticated = false;
+    const authHeader = request.headers.get("authorization");
 
-    if (idToken) {
+    if (authHeader?.startsWith("Bearer ")) {
+      const idToken = authHeader.slice(7);
       try {
         const auth = getAdminAuth();
         const decoded = await auth.verifyIdToken(idToken);
+
+        if (decoded.email_verified !== true) {
+          return NextResponse.json(
+            { error: "Email not verified", code: "EMAIL_NOT_VERIFIED" },
+            { status: 401, headers: corsHeaders }
+          );
+        }
+
         const isServiceAccount =
           decoded.email?.endsWith("@greweco-bf4e0.iam.gserviceaccount.com") ||
           decoded.email?.endsWith("@grew.eco");
@@ -183,18 +231,25 @@ export async function POST(request: NextRequest) {
         }
       } catch (e) {
         console.warn("ID token verification failed:", e);
+        return NextResponse.json(
+          { error: "Invalid authentication token", code: "INVALID_TOKEN" },
+          { status: 401, headers: corsHeaders }
+        );
       }
     }
 
-    if (!isAuthenticated && hmacSignature && HMAC_SECRET) {
-      if (!isTimestampValid(timestamp)) {
+    if (!isAuthenticated && xGrewSignature && HMAC_SECRET) {
+      const tsValue = xGrewTimestamp ? Number(xGrewTimestamp) : timestamp;
+
+      if (!isTimestampValidSeconds(tsValue)) {
         return NextResponse.json(
           { error: "Request timestamp expired or invalid" },
           { status: 401, headers: corsHeaders }
         );
       }
 
-      if (verifyHmacSignature(body, hmacSignature)) {
+      const payloadWithTs = { ...body, timestamp: tsValue };
+      if (verifyHmacSignature(payloadWithTs, xGrewSignature, HMAC_SECRET)) {
         isAuthenticated = true;
       }
     }
@@ -224,41 +279,6 @@ export async function POST(request: NextRequest) {
         { status: 429, headers: corsHeaders }
       );
     }
-  }
-
-  const userQuery = await db
-    .collection("users")
-    .where("referralId", "==", affiliateId.trim())
-    .limit(1)
-    .get();
-
-  let affiliateUid: string | null = null;
-  let affiliateRole: string | null = null;
-
-  if (!userQuery.empty) {
-    const doc = userQuery.docs[0];
-    affiliateUid = doc.id;
-    affiliateRole = (doc.data().role as string) ?? null;
-  } else {
-    const userByUidDoc = await db.collection("users").doc(affiliateId).get();
-    if (userByUidDoc.exists) {
-      affiliateUid = affiliateId;
-      affiliateRole = (userByUidDoc.data()?.role as string) ?? null;
-    }
-  }
-
-  if (!affiliateUid) {
-    return NextResponse.json(
-      { error: "Affiliate not found", code: "AFFILIATE_NOT_FOUND" },
-      { status: 404, headers: corsHeaders }
-    );
-  }
-
-  if (affiliateRole !== "affiliate") {
-    return NextResponse.json(
-      { error: "User is not a registered affiliate", code: "NOT_AFFILIATE" },
-      { status: 403, headers: corsHeaders }
-    );
   }
 
   const resolvedPlatform = normalizePlatform(platform ?? source);
@@ -305,33 +325,16 @@ export async function POST(request: NextRequest) {
 
   const safeOrderId = orderId!;
 
-  const orderDoc = await db.collection("orders").doc(safeOrderId).get();
-  let fiatOrderDoc = null;
-  let solanaOrderDoc = null;
+  const fiatOrderDoc = await db.collection("fiatOrders").doc(safeOrderId).get();
 
-  if (!orderDoc.exists) {
-    fiatOrderDoc = await db.collection("fiatOrders").doc(safeOrderId).get();
-  }
-  if (!orderDoc.exists && !fiatOrderDoc?.exists) {
-    solanaOrderDoc = await db.collection("solanaOrders").doc(safeOrderId).get();
-  }
-
-  const foundOrderDoc = orderDoc.exists
-    ? orderDoc
-    : fiatOrderDoc?.exists
-      ? fiatOrderDoc
-      : solanaOrderDoc?.exists
-        ? solanaOrderDoc
-        : null;
-
-  if (!foundOrderDoc) {
+  if (!fiatOrderDoc.exists) {
     return NextResponse.json(
       { error: "Order not found", code: "ORDER_NOT_FOUND" },
       { status: 404, headers: corsHeaders }
     );
   }
 
-  const orderData = foundOrderDoc.data() as Record<string, unknown>;
+  const orderData = fiatOrderDoc.data() as Record<string, unknown>;
 
   if (orderData.testMode === true) {
     return NextResponse.json(
@@ -340,20 +343,64 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  if (
-    String(orderData.paymentProvider || "") === "solana" ||
-    solanaOrderDoc?.exists
-  ) {
-    const solanaData = solanaOrderDoc?.exists
-      ? (solanaOrderDoc.data() as Record<string, unknown>)
-      : orderData;
-    const cluster = String(solanaData.cluster ?? "");
-    if (!MAINNET_CLUSTERS.has(cluster)) {
+  if (String(orderData.paymentProvider || "") === "solana") {
+    const solanaOrderId = String(orderData.solanaOrderId || safeOrderId);
+    const solanaOrderDoc = await db
+      .collection("solanaOrders")
+      .doc(solanaOrderId)
+      .get();
+
+    if (solanaOrderDoc.exists) {
+      const solanaData = solanaOrderDoc.data() as Record<string, unknown>;
+      const cluster = String(solanaData.cluster ?? "");
+      if (!MAINNET_CLUSTERS.has(cluster)) {
+        return NextResponse.json(
+          {
+            error: "Devnet/testnet orders are not eligible for commission",
+            code: "DEVNET_ORDER",
+          },
+          { status: 400, headers: corsHeaders }
+        );
+      }
+    } else {
       return NextResponse.json(
-        { error: "Devnet/testnet orders are not eligible for commission", code: "DEVNET_ORDER" },
-        { status: 400, headers: corsHeaders }
+        {
+          error: "Solana order record not found",
+          code: "SOLANA_ORDER_NOT_FOUND",
+        },
+        { status: 404, headers: corsHeaders }
       );
     }
+  }
+
+  const orderAffiliateCode =
+    (orderData.affiliate as Record<string, unknown> | undefined)?.code ??
+    (orderData.purchaseDetails as Record<string, unknown> | undefined)
+      ?.affiliatePartnerCode ??
+    null;
+
+  if (!orderAffiliateCode) {
+    return NextResponse.json(
+      { error: "Order has no affiliate attribution", code: "NO_AFFILIATE_ON_ORDER" },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  const orderCodeNormalized = String(orderAffiliateCode).trim();
+  const requestCodeNormalized = affiliateId.trim();
+
+  const codeMatches =
+    orderCodeNormalized === requestCodeNormalized ||
+    orderCodeNormalized === affiliateReferralId;
+
+  if (!codeMatches) {
+    return NextResponse.json(
+      {
+        error: "Affiliate code does not match order attribution",
+        code: "AFFILIATE_MISMATCH",
+      },
+      { status: 400, headers: corsHeaders }
+    );
   }
 
   const orderUserId = String(orderData.userId ?? buyerId ?? "");
@@ -365,15 +412,9 @@ export async function POST(request: NextRequest) {
   }
 
   const orderAmountUsd =
-    typeof orderData.totalUsd === "number"
-      ? orderData.totalUsd
-      : typeof orderData.amountUsd === "number"
-        ? orderData.amountUsd
-        : typeof orderData.total === "number"
-          ? orderData.total
-          : typeof orderData.totalAmountUsd === "number"
-            ? orderData.totalAmountUsd
-            : null;
+    typeof orderData.totalAmountUsd === "number"
+      ? orderData.totalAmountUsd
+      : null;
 
   if (typeof orderAmountUsd !== "number" || orderAmountUsd <= 0) {
     return NextResponse.json(
@@ -383,9 +424,9 @@ export async function POST(request: NextRequest) {
   }
 
   const orderStatus = orderData.status as string | undefined;
-  if (orderStatus && !["completed", "fulfilled", "paid"].includes(orderStatus)) {
+  if (orderStatus !== "completed") {
     return NextResponse.json(
-      { error: "Order is not in a completed state", code: "ORDER_NOT_COMPLETED" },
+      { error: "Order is not in completed state", code: "ORDER_NOT_COMPLETED" },
       { status: 400, headers: corsHeaders }
     );
   }
@@ -399,7 +440,7 @@ export async function POST(request: NextRequest) {
       const existingCommission = await transaction.get(commissionRef);
 
       if (existingCommission.exists) {
-        return { alreadyExists: true, commissionId: commissionDocId };
+        return { alreadyExists: true, duplicate: true, commissionId: commissionDocId };
       }
 
       const commissionAmount = orderAmountUsd * FIRST_SALE_COMMISSION_RATE;
@@ -434,16 +475,23 @@ export async function POST(request: NextRequest) {
         "earnings.pendingFirstSale": FieldValue.increment(commissionAmount),
       });
 
-      return { alreadyExists: false, commissionId: commissionDocId, commissionAmount };
+      return {
+        alreadyExists: false,
+        duplicate: false,
+        commissionId: commissionDocId,
+        commissionAmount,
+        eventId: analyticsRef.id,
+      };
     });
 
     if (result.alreadyExists) {
       return NextResponse.json(
         {
           success: true,
-          message: "Commission already recorded for this order",
-          commissionId: result.commissionId,
+          duplicate: true,
           alreadyExists: true,
+          eventId: result.commissionId,
+          commissionId: result.commissionId,
         },
         { headers: corsHeaders }
       );
@@ -452,7 +500,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         success: true,
+        duplicate: false,
         eventType: "conversion",
+        eventId: result.eventId,
         affiliateId: affiliateUid,
         commissionId: result.commissionId,
         commissionAmountUsd: result.commissionAmount,

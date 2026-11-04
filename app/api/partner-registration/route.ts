@@ -8,21 +8,20 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RegistrationPayload = {
-  uid: string;
   email: string;
   displayName: string;
   inviteCode: string;
-  idToken?: string;
+  idToken: string;
 };
 
 function isValidPayload(body: unknown): body is RegistrationPayload {
   if (!body || typeof body !== "object") return false;
   const b = body as Record<string, unknown>;
   return (
-    typeof b.uid === "string" &&
     typeof b.email === "string" &&
     typeof b.displayName === "string" &&
-    typeof b.inviteCode === "string"
+    typeof b.inviteCode === "string" &&
+    typeof b.idToken === "string"
   );
 }
 
@@ -31,20 +30,17 @@ export async function POST(request: NextRequest) {
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json(
-      { error: "Invalid JSON body" },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
   if (!isValidPayload(body)) {
     return NextResponse.json(
-      { error: "Missing required fields: uid, email, displayName, inviteCode" },
+      { error: "Missing required fields: email, displayName, inviteCode, idToken" },
       { status: 400 }
     );
   }
 
-  const { uid, email, displayName, inviteCode, idToken } = body;
+  const { email, displayName, inviteCode, idToken } = body;
   const trimmedCode = inviteCode.trim();
 
   if (!trimmedCode) {
@@ -57,22 +53,24 @@ export async function POST(request: NextRequest) {
   const auth = getAdminAuth();
   const db = getAdminFirestore();
 
-  if (idToken) {
-    try {
-      const decoded = await auth.verifyIdToken(idToken);
-      if (decoded.uid !== uid) {
-        return NextResponse.json(
-          { error: "Token UID mismatch" },
-          { status: 403 }
-        );
-      }
-    } catch (e) {
-      console.error("Token verification failed:", e);
+  let uid: string;
+  try {
+    const decoded = await auth.verifyIdToken(idToken);
+
+    if (decoded.email_verified !== true) {
       return NextResponse.json(
-        { error: "Invalid authentication token" },
+        { error: "Email not verified. Please verify your email first.", code: "EMAIL_NOT_VERIFIED" },
         { status: 401 }
       );
     }
+
+    uid = decoded.uid;
+  } catch (e) {
+    console.error("Token verification failed:", e);
+    return NextResponse.json(
+      { error: "Invalid authentication token", code: "INVALID_TOKEN" },
+      { status: 401 }
+    );
   }
 
   const invitesRef = db.collection("invites");
@@ -182,10 +180,4 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
-
-  return NextResponse.json({
-    success: true,
-    referralId,
-    message: "Partner registration complete",
-  });
 }
