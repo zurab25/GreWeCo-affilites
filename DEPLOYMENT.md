@@ -62,46 +62,39 @@ gcloud run services update affiliates-greweco \
 ## Firestore Collections
 
 The app uses these collections:
-- `users` — partner profiles with `role: "affiliate"`, `referralId`, `stats`, `earnings`
+- `users` — shared with Arena; affiliates have `role: "affiliate"`, `referralId`, `stats`, `earnings`
+- `affiliateProfiles` — separate affiliate-only collection (avoids overwriting Arena user docs)
 - `invites` — invite codes with `id`, `used`, `usedBy`, `usedAt`
 - `clicks_analytics` — click and conversion events
-- `commissions` — commission ledger entries
+- `commissions` — commission ledger entries (doc ID = `commission-{orderId}` for idempotency)
+- `affiliateConversions` — outbox for Arena-to-affiliates conversion delivery (server-only)
 
-### Firestore Rules (Recommended)
+### Firestore Rules
 
-Ensure these rules allow authenticated reads and server-side writes:
+The rules are in `firestore.rules`. Since both Arena and Affiliates share the same Firebase project (`greweco-bf4e0`), these rules must be **merged with Arena's rules** before deployment.
 
-```javascript
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    // Users can read their own profile
-    match /users/{userId} {
-      allow read: if request.auth != null && request.auth.uid == userId;
-      allow write: if false; // Server-only
-    }
-    
-    // Invites: users can read (to validate), server writes
-    match /invites/{inviteId} {
-      allow read: if request.auth != null;
-      allow write: if false; // Server-only
-    }
-    
-    // Analytics: users read their own, server writes
-    match /clicks_analytics/{docId} {
-      allow read: if request.auth != null && 
-        resource.data.affiliateId == request.auth.uid;
-      allow write: if false; // Server-only
-    }
-    
-    // Commissions: users read their own, server writes
-    match /commissions/{docId} {
-      allow read: if request.auth != null && 
-        resource.data.affiliateId == request.auth.uid;
-      allow write: if false; // Server-only
-    }
-  }
+Key rules:
+- Affiliates can read their own `commissions` and `clicks_analytics` (where `affiliateId == uid`)
+- All writes are server-only via Admin SDK
+- `affiliateConversions` is fully locked (server-side outbox)
+
+### Firestore Indexes
+
+Required composite index for the earnings dashboard (in `firestore.indexes.json`):
+
+```json
+{
+  "collectionGroup": "commissions",
+  "fields": [
+    { "fieldPath": "affiliateId", "order": "ASCENDING" },
+    { "fieldPath": "createdAt", "order": "DESCENDING" }
+  ]
 }
+```
+
+Deploy indexes:
+```bash
+firebase deploy --only firestore:indexes
 ```
 
 ## Deployment Steps
@@ -234,11 +227,25 @@ HMAC-SHA256(key=LINK_EVENT_HMAC_SECRET, data="eventType|affiliateId|orderId|buye
 
 **Security Features:**
 - CORS restricted to `arena.grew.eco` and `affiliates.grew.eco`
-- Clicks: rate-limited to 10 per minute per IP+affiliate combination
+- Clicks: rate-limited to 10 per minute per IP+affiliate combination (see note below)
 - Conversions: require HMAC or ID token authentication
 - Order amount is fetched from Firestore (`orders`, `fiatOrders`, or `solanaOrders`)
 - Commission doc ID is deterministic (`commission-{orderId}`) to prevent duplicates
 - Uses Firestore transaction to ensure at most one commission per order
+- Self-referral blocked: rejects when `affiliateUid === buyerId`
+- Test orders rejected: orders with `testMode: true` are not eligible
+- Devnet orders rejected: Solana orders must have `cluster: "mainnet-beta"` or `"mainnet"`
+- Affiliate role required: only users with `role: "affiliate"` can receive commissions
+
+**Rate Limiter Limitation:**
+The click rate limiter uses in-memory storage, which has these limitations:
+- State is lost on server restart
+- State is not shared across Cloud Run instances
+- Under high load with multiple instances, each instance may allow up to 10 requests independently
+
+For stricter rate limiting, consider a Firestore-backed or Redis-backed implementation.
+The current implementation provides reasonable protection against casual abuse while
+keeping latency low for legitimate traffic.
 
 **Response:**
 ```json
@@ -254,6 +261,10 @@ HMAC-SHA256(key=LINK_EVENT_HMAC_SECRET, data="eventType|affiliateId|orderId|buye
 **Error Codes:**
 - `RATE_LIMITED` (429) — click rate limit exceeded
 - `AUTH_REQUIRED` (401) — conversion without valid authentication
+- `NOT_AFFILIATE` (403) — user exists but does not have `role: "affiliate"`
 - `ORDER_NOT_FOUND` (404) — order doesn't exist in any orders collection
 - `ORDER_NOT_COMPLETED` (400) — order status is not completed/fulfilled/paid
 - `INVALID_ORDER_AMOUNT` (400) — order has no valid totalUsd/amountUsd field
+- `TEST_ORDER` (400) — order has `testMode: true`
+- `DEVNET_ORDER` (400) — Solana order is not on mainnet
+- `SELF_REFERRAL` (400) — buyer is the same as the affiliate

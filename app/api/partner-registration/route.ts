@@ -100,39 +100,80 @@ export async function POST(request: NextRequest) {
 
   const referralId = generateReferralId();
 
-  const batch = db.batch();
-
   const userRef = db.collection("users").doc(uid);
-  batch.set(userRef, {
-    role: "affiliate",
-    displayName,
-    email,
-    referralId,
-    createdAt: FieldValue.serverTimestamp(),
-    earnings: {
-      directBonus: 0,
-      pendingFirstSale: 0,
-      pendingCarbon: 0,
-      pendingTimber: 0,
-      paidOut: 0,
-    },
-    stats: {
-      clicks: 0,
-      conversions: 0,
-      earningsUsd: 0,
-    },
-  });
-
-  batch.update(inviteDoc.ref, {
-    used: true,
-    usedBy: uid,
-    usedAt: FieldValue.serverTimestamp(),
-  });
+  const affiliateProfilesRef = db.collection("affiliateProfiles").doc(uid);
 
   try {
-    await batch.commit();
+    const result = await db.runTransaction(async (transaction) => {
+      const existingUser = await transaction.get(userRef);
+      const existingInvite = await transaction.get(inviteDoc.ref);
+
+      if (!existingInvite.exists) {
+        throw new Error("INVITE_NOT_FOUND");
+      }
+
+      const inviteNow = existingInvite.data();
+      if (inviteNow?.used === true) {
+        throw new Error("INVITE_ALREADY_USED");
+      }
+
+      const affiliateData = {
+        role: "affiliate",
+        displayName,
+        email,
+        referralId,
+        createdAt: FieldValue.serverTimestamp(),
+        earnings: {
+          directBonus: 0,
+          pendingFirstSale: 0,
+          pendingCarbon: 0,
+          pendingTimber: 0,
+          paidOut: 0,
+        },
+        stats: {
+          clicks: 0,
+          conversions: 0,
+          earningsUsd: 0,
+        },
+      };
+
+      transaction.set(affiliateProfilesRef, affiliateData);
+
+      if (existingUser.exists) {
+        transaction.update(userRef, {
+          role: "affiliate",
+          referralId,
+          affiliateProfileId: uid,
+        });
+      } else {
+        transaction.set(userRef, affiliateData);
+      }
+
+      transaction.update(inviteDoc.ref, {
+        used: true,
+        usedBy: uid,
+        usedAt: FieldValue.serverTimestamp(),
+      });
+
+      return { referralId };
+    });
+
+    return NextResponse.json({
+      success: true,
+      referralId: result.referralId,
+      message: "Partner registration complete",
+    });
   } catch (e) {
-    console.error("Batch commit failed:", e);
+    const errMsg = e instanceof Error ? e.message : String(e);
+    console.error("Registration transaction failed:", errMsg);
+
+    if (errMsg === "INVITE_NOT_FOUND" || errMsg === "INVITE_ALREADY_USED") {
+      return NextResponse.json(
+        { error: "Invite code has already been used", code: "INVITE_USED" },
+        { status: 400 }
+      );
+    }
+
     return NextResponse.json(
       {
         error: "Failed to complete registration. Please contact support.",

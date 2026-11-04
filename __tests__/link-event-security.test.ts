@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { createHmac } from "crypto";
 
 const HMAC_SECRET = "test-secret-key-for-hmac-verification-32bytes";
+const MAINNET_CLUSTERS = new Set(["mainnet-beta", "mainnet"]);
 
 function generateHmacSignature(payload: {
   eventType: string;
@@ -279,7 +280,9 @@ describe("Order Amount Extraction", () => {
           ? orderData.amountUsd
           : typeof orderData.total === "number"
             ? orderData.total
-            : null;
+            : typeof orderData.totalAmountUsd === "number"
+              ? orderData.totalAmountUsd
+              : null;
 
     if (typeof amount !== "number" || amount <= 0) {
       return null;
@@ -299,9 +302,13 @@ describe("Order Amount Extraction", () => {
     expect(extractOrderAmount({ total: 100.0 })).toBe(100.0);
   });
 
+  it("should fall back to totalAmountUsd", () => {
+    expect(extractOrderAmount({ totalAmountUsd: 75.0 })).toBe(75.0);
+  });
+
   it("should prefer totalUsd over others", () => {
     expect(
-      extractOrderAmount({ totalUsd: 65.0, amountUsd: 55.0, total: 100.0 })
+      extractOrderAmount({ totalUsd: 65.0, amountUsd: 55.0, total: 100.0, totalAmountUsd: 75.0 })
     ).toBe(65.0);
   });
 
@@ -356,5 +363,141 @@ describe("Order Status Validation", () => {
 
   it("should reject failed status", () => {
     expect(isOrderCompleted("failed")).toBe(false);
+  });
+});
+
+describe("Self-Referral Detection", () => {
+  function isSelfReferral(
+    affiliateUid: string,
+    orderUserId: string | undefined,
+    buyerId: string | undefined
+  ): boolean {
+    const resolvedBuyerId = String(orderUserId ?? buyerId ?? "");
+    return resolvedBuyerId !== "" && resolvedBuyerId === affiliateUid;
+  }
+
+  it("should detect self-referral when orderUserId matches affiliateUid", () => {
+    expect(isSelfReferral("user123", "user123", undefined)).toBe(true);
+  });
+
+  it("should detect self-referral when buyerId matches affiliateUid", () => {
+    expect(isSelfReferral("user123", undefined, "user123")).toBe(true);
+  });
+
+  it("should prefer orderUserId over buyerId", () => {
+    expect(isSelfReferral("user123", "user456", "user123")).toBe(false);
+  });
+
+  it("should not flag different users", () => {
+    expect(isSelfReferral("affiliate1", "buyer2", undefined)).toBe(false);
+  });
+
+  it("should not flag when no buyer info", () => {
+    expect(isSelfReferral("affiliate1", undefined, undefined)).toBe(false);
+  });
+
+  it("should handle empty strings", () => {
+    expect(isSelfReferral("user123", "", "")).toBe(false);
+  });
+});
+
+describe("Test Order Detection", () => {
+  function isTestOrder(orderData: Record<string, unknown>): boolean {
+    return orderData.testMode === true;
+  }
+
+  it("should detect testMode: true", () => {
+    expect(isTestOrder({ testMode: true })).toBe(true);
+  });
+
+  it("should not flag testMode: false", () => {
+    expect(isTestOrder({ testMode: false })).toBe(false);
+  });
+
+  it("should not flag missing testMode", () => {
+    expect(isTestOrder({})).toBe(false);
+  });
+
+  it("should not flag testMode: 'true' (string)", () => {
+    expect(isTestOrder({ testMode: "true" })).toBe(false);
+  });
+});
+
+describe("Solana Cluster Validation", () => {
+  function isMainnetCluster(cluster: string | undefined): boolean {
+    return MAINNET_CLUSTERS.has(String(cluster ?? ""));
+  }
+
+  it("should accept mainnet-beta", () => {
+    expect(isMainnetCluster("mainnet-beta")).toBe(true);
+  });
+
+  it("should accept mainnet", () => {
+    expect(isMainnetCluster("mainnet")).toBe(true);
+  });
+
+  it("should reject devnet", () => {
+    expect(isMainnetCluster("devnet")).toBe(false);
+  });
+
+  it("should reject testnet", () => {
+    expect(isMainnetCluster("testnet")).toBe(false);
+  });
+
+  it("should reject empty string", () => {
+    expect(isMainnetCluster("")).toBe(false);
+  });
+
+  it("should reject undefined", () => {
+    expect(isMainnetCluster(undefined)).toBe(false);
+  });
+
+  it("should reject localnet", () => {
+    expect(isMainnetCluster("localnet")).toBe(false);
+  });
+});
+
+describe("Affiliate Role Validation", () => {
+  function isValidAffiliateRole(role: string | null | undefined): boolean {
+    return role === "affiliate";
+  }
+
+  it("should accept affiliate role", () => {
+    expect(isValidAffiliateRole("affiliate")).toBe(true);
+  });
+
+  it("should reject user role", () => {
+    expect(isValidAffiliateRole("user")).toBe(false);
+  });
+
+  it("should reject company role", () => {
+    expect(isValidAffiliateRole("company")).toBe(false);
+  });
+
+  it("should reject admin role", () => {
+    expect(isValidAffiliateRole("admin")).toBe(false);
+  });
+
+  it("should reject null role", () => {
+    expect(isValidAffiliateRole(null)).toBe(false);
+  });
+
+  it("should reject undefined role", () => {
+    expect(isValidAffiliateRole(undefined)).toBe(false);
+  });
+});
+
+describe("In-Memory Rate Limiter Limitations", () => {
+  it("documents that rate limit is per-instance only", () => {
+    const limitations = [
+      "Rate limit state is stored in memory",
+      "State is lost on server restart",
+      "State is not shared across Cloud Run instances",
+      "Under high load, multiple instances may each allow CLICK_RATE_LIMIT_MAX requests",
+      "For strict rate limiting, use Firestore or Redis-backed implementation",
+    ];
+
+    expect(limitations.length).toBeGreaterThan(0);
+    expect(limitations[0]).toContain("memory");
   });
 });

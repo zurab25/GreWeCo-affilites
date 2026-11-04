@@ -57,6 +57,9 @@ const ALLOWED_ORIGINS = [
 
 const CLICK_RATE_LIMIT_WINDOW_MS = 60_000;
 const CLICK_RATE_LIMIT_MAX = 10;
+
+const MAINNET_CLUSTERS = new Set(["mainnet-beta", "mainnet"]);
+
 const clickRateLimitMap = new Map<string, { count: number; windowStart: number }>();
 
 function verifyHmacSignature(
@@ -230,13 +233,17 @@ export async function POST(request: NextRequest) {
     .get();
 
   let affiliateUid: string | null = null;
+  let affiliateRole: string | null = null;
 
   if (!userQuery.empty) {
-    affiliateUid = userQuery.docs[0].id;
+    const doc = userQuery.docs[0];
+    affiliateUid = doc.id;
+    affiliateRole = (doc.data().role as string) ?? null;
   } else {
     const userByUidDoc = await db.collection("users").doc(affiliateId).get();
     if (userByUidDoc.exists) {
       affiliateUid = affiliateId;
+      affiliateRole = (userByUidDoc.data()?.role as string) ?? null;
     }
   }
 
@@ -244,6 +251,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       { error: "Affiliate not found", code: "AFFILIATE_NOT_FOUND" },
       { status: 404, headers: corsHeaders }
+    );
+  }
+
+  if (affiliateRole !== "affiliate") {
+    return NextResponse.json(
+      { error: "User is not a registered affiliate", code: "NOT_AFFILIATE" },
+      { status: 403, headers: corsHeaders }
     );
   }
 
@@ -319,6 +333,37 @@ export async function POST(request: NextRequest) {
 
   const orderData = foundOrderDoc.data() as Record<string, unknown>;
 
+  if (orderData.testMode === true) {
+    return NextResponse.json(
+      { error: "Test orders are not eligible for commission", code: "TEST_ORDER" },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  if (
+    String(orderData.paymentProvider || "") === "solana" ||
+    solanaOrderDoc?.exists
+  ) {
+    const solanaData = solanaOrderDoc?.exists
+      ? (solanaOrderDoc.data() as Record<string, unknown>)
+      : orderData;
+    const cluster = String(solanaData.cluster ?? "");
+    if (!MAINNET_CLUSTERS.has(cluster)) {
+      return NextResponse.json(
+        { error: "Devnet/testnet orders are not eligible for commission", code: "DEVNET_ORDER" },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+  }
+
+  const orderUserId = String(orderData.userId ?? buyerId ?? "");
+  if (orderUserId && orderUserId === affiliateUid) {
+    return NextResponse.json(
+      { error: "Self-referral is not allowed", code: "SELF_REFERRAL" },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
   const orderAmountUsd =
     typeof orderData.totalUsd === "number"
       ? orderData.totalUsd
@@ -326,7 +371,9 @@ export async function POST(request: NextRequest) {
         ? orderData.amountUsd
         : typeof orderData.total === "number"
           ? orderData.total
-          : null;
+          : typeof orderData.totalAmountUsd === "number"
+            ? orderData.totalAmountUsd
+            : null;
 
   if (typeof orderAmountUsd !== "number" || orderAmountUsd <= 0) {
     return NextResponse.json(
