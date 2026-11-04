@@ -37,6 +37,6 @@ export const BRAND_COLORS = {
 
 export function buildReferralLandingUrl(refId: string): string {
   const url = new URL(DOMAINS.arena);
-  url.searchParams.set("ref", refId);
+  url.searchParams.set("aff", refId);
   return url.toString();
 }
