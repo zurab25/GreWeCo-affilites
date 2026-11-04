@@ -45,12 +45,13 @@ Required for API routes (`/api/partner-registration`, `/api/link-event`):
 - `FIREBASE_PROJECT_ID` — same as `NEXT_PUBLIC_FIREBASE_PROJECT_ID`
 - `FIREBASE_CLIENT_EMAIL` — service account email (e.g., `firebase-adminsdk-xxxxx@greweco-bf4e0.iam.gserviceaccount.com`)
 - `FIREBASE_PRIVATE_KEY` — service account private key (with `\n` escaped)
+- `LINK_EVENT_HMAC_SECRET` — shared secret for server-to-server calls (generate with `openssl rand -hex 32`)
 
 **To set in Cloud Run:**
 ```bash
 gcloud run services update affiliates-greweco \
   --region=us-central1 \
-  --set-env-vars="FIREBASE_PROJECT_ID=greweco-bf4e0,FIREBASE_CLIENT_EMAIL=..." \
+  --set-env-vars="FIREBASE_PROJECT_ID=greweco-bf4e0,FIREBASE_CLIENT_EMAIL=...,LINK_EVENT_HMAC_SECRET=..." \
   --project=greweco-bf4e0
 ```
 
@@ -153,9 +154,29 @@ Arena must change its code to persist the affiliate attribution on orders. Curre
 3. **In order fulfillment (`fulfillVerifiedFiatOrder`, `fulfillSolanaPurchase`):**
    - After successful payment verification
    - Read `affiliateId` from the order document
-   - If present, POST conversion event to `https://affiliates.grew.eco/api/link-event`:
+   - If present, POST conversion event with HMAC authentication:
      ```javascript
-     if (order.affiliateId) {
+     import { createHmac } from 'crypto';
+
+     async function postConversion(order) {
+       if (!order.affiliateId) return;
+
+       const HMAC_SECRET = process.env.LINK_EVENT_HMAC_SECRET;
+       const timestamp = Date.now();
+
+       // Build signature: eventType|affiliateId|orderId|buyerId|timestamp
+       const dataToSign = [
+         'conversion',
+         order.affiliateId,
+         order.id,
+         order.userId || '',
+         timestamp.toString(),
+       ].join('|');
+
+       const hmacSignature = createHmac('sha256', HMAC_SECRET)
+         .update(dataToSign)
+         .digest('hex');
+
        await fetch('https://affiliates.grew.eco/api/link-event', {
          method: 'POST',
          headers: { 'Content-Type': 'application/json' },
@@ -165,11 +186,13 @@ Arena must change its code to persist the affiliate attribution on orders. Curre
            source: order.affiliateSource,
            orderId: order.id,
            buyerId: order.userId,
-           orderAmountUsd: order.totalUsd,
+           timestamp,
+           hmacSignature,
          }),
        });
      }
      ```
+   - **Important:** The `orderAmountUsd` is now read from the order document in Firestore, not from the request body. This prevents forged commission amounts.
 
 4. **Referral URL format:**
    - Use `?aff=` parameter (not `?ref=`)
@@ -179,31 +202,58 @@ Arena must change its code to persist the affiliate attribution on orders. Curre
 
 **POST `/api/link-event`**
 
-Request body:
+#### Click Events (from browser, rate-limited)
 ```json
 {
-  "eventType": "click" | "conversion",
+  "eventType": "click",
   "affiliateId": "REFERRAL_CODE",
-  "source": "instagram" | "facebook" | "x" | "youtube",
-  "platform": "...",  // alias for source
-  "buyerId": "...",   // optional, for conversions
-  "orderId": "...",   // required for commission
-  "orderAmountUsd": 65.00  // required for commission
+  "source": "instagram" | "facebook" | "x" | "youtube"
 }
 ```
 
-Response:
+#### Conversion Events (server-to-server only, requires authentication)
+```json
+{
+  "eventType": "conversion",
+  "affiliateId": "REFERRAL_CODE",
+  "orderId": "ORDER_ID",
+  "buyerId": "BUYER_UID",
+  "timestamp": 1699000000000,
+  "hmacSignature": "hex-encoded-sha256-hmac"
+}
+```
+
+**Authentication (conversions only):**
+- Option 1: Firebase ID token from a service account or `@grew.eco` email
+- Option 2: HMAC signature with shared secret (`LINK_EVENT_HMAC_SECRET`)
+
+**HMAC Signature Format:**
+```
+HMAC-SHA256(key=LINK_EVENT_HMAC_SECRET, data="eventType|affiliateId|orderId|buyerId|timestamp")
+```
+
+**Security Features:**
+- CORS restricted to `arena.grew.eco` and `affiliates.grew.eco`
+- Clicks: rate-limited to 10 per minute per IP+affiliate combination
+- Conversions: require HMAC or ID token authentication
+- Order amount is fetched from Firestore (`orders`, `fiatOrders`, or `solanaOrders`)
+- Commission doc ID is deterministic (`commission-{orderId}`) to prevent duplicates
+- Uses Firestore transaction to ensure at most one commission per order
+
+**Response:**
 ```json
 {
   "success": true,
-  "eventId": "...",
-  "eventType": "...",
-  "affiliateId": "..."
+  "eventType": "conversion",
+  "affiliateId": "user-uid",
+  "commissionId": "commission-ORDER_ID",
+  "commissionAmountUsd": 6.50
 }
 ```
 
-The endpoint:
-- Looks up affiliate by `referralId` or UID
-- Records event to `clicks_analytics`
-- Updates user stats (`stats.clicks` or `stats.conversions`)
-- For conversions with `orderAmountUsd`, creates commission entry (10% of amount)
+**Error Codes:**
+- `RATE_LIMITED` (429) — click rate limit exceeded
+- `AUTH_REQUIRED` (401) — conversion without valid authentication
+- `ORDER_NOT_FOUND` (404) — order doesn't exist in any orders collection
+- `ORDER_NOT_COMPLETED` (400) — order status is not completed/fulfilled/paid
+- `INVALID_ORDER_AMOUNT` (400) — order has no valid totalUsd/amountUsd field
