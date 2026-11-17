@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { createHmac } from "crypto";
+import { NextRequest } from "next/server";
 import {
   verifyHmacSignature,
   isTimestampValidSeconds,
+  getTrustedClientIp,
 } from "@/app/api/link-event/route";
 
 const TEST_SECRET = "test-secret-key-for-hmac-verification-32bytes";
@@ -344,6 +346,10 @@ describe("code_check Event Type", () => {
     return t === "click" || t === "conversion" || t === "code_check";
   }
 
+  function codeCheckResponse(valid: boolean, affiliateId: string) {
+    return { success: valid, valid, affiliateId };
+  }
+
   it("should accept click", () => {
     expect(isValidEventType("click")).toBe(true);
   });
@@ -358,6 +364,101 @@ describe("code_check Event Type", () => {
 
   it("should reject unknown types", () => {
     expect(isValidEventType("signup")).toBe(false);
+  });
+
+  it("should return success, valid, and affiliateId for a valid code", () => {
+    expect(codeCheckResponse(true, "PARTNER42")).toEqual({
+      success: true,
+      valid: true,
+      affiliateId: "PARTNER42",
+    });
+  });
+
+  it("should return the same shape for an invalid code", () => {
+    expect(codeCheckResponse(false, "NOPE")).toEqual({
+      success: false,
+      valid: false,
+      affiliateId: "NOPE",
+    });
+  });
+});
+
+describe("Trusted Client IP", () => {
+  function makeRequest(headers: Record<string, string>): NextRequest {
+    return new NextRequest("https://affiliates.grew.eco/api/link-event", {
+      method: "POST",
+      headers,
+    });
+  }
+
+  it("prefers Fastly-Client-IP over X-Forwarded-For", () => {
+    const req = makeRequest({
+      "fastly-client-ip": "203.0.113.10",
+      "x-forwarded-for": "1.2.3.4, 203.0.113.10, 10.0.0.1",
+    });
+    expect(getTrustedClientIp(req)).toBe("203.0.113.10");
+  });
+
+  it("uses the rightmost X-Forwarded-For hop (Cloud Run appended)", () => {
+    const req = makeRequest({
+      "x-forwarded-for": "1.2.3.4, 198.51.100.20",
+    });
+    expect(getTrustedClientIp(req)).toBe("198.51.100.20");
+  });
+
+  it("does not trust a spoofed leftmost X-Forwarded-For value alone when Cloud Run appends", () => {
+    const req = makeRequest({
+      "x-forwarded-for": "spoofed.ip, 203.0.113.99",
+    });
+    expect(getTrustedClientIp(req)).toBe("203.0.113.99");
+    expect(getTrustedClientIp(req)).not.toBe("spoofed.ip");
+  });
+
+  it("falls back to X-Real-IP", () => {
+    const req = makeRequest({ "x-real-ip": "203.0.113.55" });
+    expect(getTrustedClientIp(req)).toBe("203.0.113.55");
+  });
+});
+
+describe("partner-registration role/referralId preservation", () => {
+  function mergeUserFields(existing: {
+    role?: string;
+    referralId?: string;
+  }): { role: string | undefined; referralId: string; generated: boolean } {
+    const existingRole =
+      typeof existing.role === "string" && existing.role.length > 0
+        ? existing.role
+        : null;
+    const existingReferralId =
+      typeof existing.referralId === "string" && existing.referralId.length > 0
+        ? existing.referralId
+        : null;
+    const generated = !existingReferralId;
+    return {
+      role: existingRole ?? "affiliate",
+      referralId: existingReferralId ?? "NEWREF123",
+      generated,
+    };
+  }
+
+  it("keeps an existing company role", () => {
+    const result = mergeUserFields({ role: "company", referralId: "OLDREF" });
+    expect(result.role).toBe("company");
+    expect(result.referralId).toBe("OLDREF");
+    expect(result.generated).toBe(false);
+  });
+
+  it("keeps an existing referralId without regenerating", () => {
+    const result = mergeUserFields({ role: "affiliate", referralId: "KEEPME" });
+    expect(result.referralId).toBe("KEEPME");
+    expect(result.generated).toBe(false);
+  });
+
+  it("sets affiliate role and generates referralId only when missing", () => {
+    const result = mergeUserFields({});
+    expect(result.role).toBe("affiliate");
+    expect(result.referralId).toBe("NEWREF123");
+    expect(result.generated).toBe(true);
   });
 });
 

@@ -233,7 +233,11 @@ Arena must change its code to persist the affiliate attribution on orders. Curre
   "affiliateId": "REFERRAL_CODE"
 }
 ```
-Response: `{ "valid": true, "affiliateId": "REFERRAL_CODE" }`
+Response (same shape for valid and invalid; Arena reads `success`):
+`{ "success": true, "valid": true, "affiliateId": "REFERRAL_CODE" }`
+
+Rate-limited to 20 checks/minute per trusted client IP. Responses also use a
+minimum latency floor so valid/invalid timing cannot be used to enumerate codes.
 
 #### Conversion Events (server-to-server only, requires authentication)
 
@@ -266,7 +270,11 @@ Example: `"conversion|ABC123|order-1|user-1|1730700000"`
 **Security Features:**
 - CORS restricted to `arena.grew.eco` and `affiliates.grew.eco`
 - CORS allows headers: `Content-Type`, `Authorization`, `X-Grew-Signature`, `X-Grew-Timestamp`
-- Clicks: rate-limited to 10 per minute per IP+affiliate combination (see note below)
+- Clicks: rate-limited to 10 per minute per trusted-IP+affiliate combination
+- Code checks: rate-limited to 20 per minute per trusted client IP (+ timing floor)
+- Trusted client IP prefers `Fastly-Client-IP` / `CF-Connecting-IP` / `X-Client-IP`,
+  then the **rightmost** `X-Forwarded-For` hop (Cloud Run appends the connecting IP).
+  The leftmost `X-Forwarded-For` value is never trusted (spoofable).
 - Conversions: require HMAC (in headers) or ID token authentication
 - ID token path requires `email_verified: true`
 - Order amount is fetched from `fiatOrders/{orderId}.totalAmountUsd` only
@@ -279,12 +287,17 @@ Example: `"conversion|ABC123|order-1|user-1|1730700000"`
 - Devnet orders rejected: Solana orders must have `cluster: "mainnet-beta"` or `"mainnet"`
 - Affiliate role required: only users with `role: "affiliate"` can receive commissions
 - Order status must be exactly `"completed"` (not `fulfilled` or `paid`)
+- Partner registration never overwrites an existing `users.role` or regenerates an
+  existing `users.referralId`
+
+**Runtime:** Node 22 (`package.json` `engines.node`, CI, and `firebase.json`
+`frameworksBackend.runtime: nodejs22`). Required by `firebase-admin@14`.
 
 **Rate Limiter Limitation:**
-The click rate limiter uses in-memory storage, which has these limitations:
+The click/code_check rate limiters use in-memory storage, which has these limitations:
 - State is lost on server restart
 - State is not shared across Cloud Run instances
-- Under high load with multiple instances, each instance may allow up to 10 requests independently
+- Under high load with multiple instances, each instance may allow up to the limit independently
 
 For stricter rate limiting, consider a Firestore-backed or Redis-backed implementation.
 The current implementation provides reasonable protection against casual abuse while
@@ -315,7 +328,7 @@ keeping latency low for legitimate traffic.
 ```
 
 **Error Codes:**
-- `RATE_LIMITED` (429) — click rate limit exceeded
+- `RATE_LIMITED` (429) — click or code_check rate limit exceeded
 - `AUTH_REQUIRED` (401) — conversion without valid authentication
 - `EMAIL_NOT_VERIFIED` (401) — ID token email not verified
 - `INVALID_TOKEN` (401) — ID token verification failed

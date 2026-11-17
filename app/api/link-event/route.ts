@@ -56,12 +56,50 @@ const ALLOWED_ORIGINS = [
 const CLICK_RATE_LIMIT_WINDOW_MS = 60_000;
 const CLICK_RATE_LIMIT_MAX = 10;
 
+const CODE_CHECK_RATE_LIMIT_WINDOW_MS = 60_000;
+const CODE_CHECK_RATE_LIMIT_MAX = 20;
+const CODE_CHECK_MIN_LATENCY_MS = 100;
+
 const MAINNET_CLUSTERS = new Set(["mainnet-beta", "mainnet"]);
 
 const clickRateLimitMap = new Map<
   string,
   { count: number; windowStart: number }
 >();
+
+const codeCheckRateLimitMap = new Map<
+  string,
+  { count: number; windowStart: number }
+>();
+
+/**
+ * Trusted client IP for Cloud Run / Firebase Hosting.
+ * Prefer platform-set headers; never trust the leftmost X-Forwarded-For hop
+ * (spoofable). Cloud Run appends the connecting IP as the rightmost value.
+ */
+export function getTrustedClientIp(request: NextRequest): string {
+  const fastlyClientIp = request.headers.get("fastly-client-ip");
+  if (fastlyClientIp) return fastlyClientIp.trim();
+
+  const cfConnectingIp = request.headers.get("cf-connecting-ip");
+  if (cfConnectingIp) return cfConnectingIp.trim();
+
+  const xClientIp = request.headers.get("x-client-ip");
+  if (xClientIp) return xClientIp.trim();
+
+  const xForwardedFor = request.headers.get("x-forwarded-for");
+  if (xForwardedFor) {
+    const parts = xForwardedFor
+      .split(",")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    if (parts.length > 0) {
+      return parts[parts.length - 1];
+    }
+  }
+
+  return request.headers.get("x-real-ip")?.trim() || "unknown";
+}
 
 export function verifyHmacSignature(
   payload: LinkEventPayload,
@@ -97,21 +135,48 @@ export function isTimestampValidSeconds(timestampSeconds: number | undefined): b
   return Math.abs(nowSeconds - timestampSeconds) < fiveMinutesSeconds;
 }
 
-function checkClickRateLimit(key: string): boolean {
+function checkRateLimit(
+  map: Map<string, { count: number; windowStart: number }>,
+  key: string,
+  windowMs: number,
+  max: number
+): boolean {
   const now = Date.now();
-  const entry = clickRateLimitMap.get(key);
+  const entry = map.get(key);
 
-  if (!entry || now - entry.windowStart > CLICK_RATE_LIMIT_WINDOW_MS) {
-    clickRateLimitMap.set(key, { count: 1, windowStart: now });
+  if (!entry || now - entry.windowStart > windowMs) {
+    map.set(key, { count: 1, windowStart: now });
     return true;
   }
 
-  if (entry.count >= CLICK_RATE_LIMIT_MAX) {
+  if (entry.count >= max) {
     return false;
   }
 
   entry.count++;
   return true;
+}
+
+function checkClickRateLimit(key: string): boolean {
+  return checkRateLimit(
+    clickRateLimitMap,
+    key,
+    CLICK_RATE_LIMIT_WINDOW_MS,
+    CLICK_RATE_LIMIT_MAX
+  );
+}
+
+function checkCodeCheckRateLimit(key: string): boolean {
+  return checkRateLimit(
+    codeCheckRateLimitMap,
+    key,
+    CODE_CHECK_RATE_LIMIT_WINDOW_MS,
+    CODE_CHECK_RATE_LIMIT_MAX
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function getCorsHeaders(origin: string | null): Record<string, string> {
@@ -181,8 +246,27 @@ export async function POST(request: NextRequest) {
   }
 
   if (eventType === "code_check") {
+    const startedAt = Date.now();
+    const clientIp = getTrustedClientIp(request);
+
+    if (!checkCodeCheckRateLimit(clientIp)) {
+      return NextResponse.json(
+        { error: "Rate limit exceeded. Try again later.", code: "RATE_LIMITED" },
+        { status: 429, headers: corsHeaders }
+      );
+    }
+
     const valid = affiliateUid !== null && affiliateRole === "affiliate";
-    return NextResponse.json({ valid, affiliateId }, { headers: corsHeaders });
+    const elapsed = Date.now() - startedAt;
+    if (elapsed < CODE_CHECK_MIN_LATENCY_MS) {
+      await sleep(CODE_CHECK_MIN_LATENCY_MS - elapsed);
+    }
+
+    // Arena's validatePartnerCode reads `success`; keep `valid` for clarity.
+    return NextResponse.json(
+      { success: valid, valid, affiliateId },
+      { headers: corsHeaders }
+    );
   }
 
   if (!affiliateUid) {
@@ -266,11 +350,7 @@ export async function POST(request: NextRequest) {
   }
 
   if (eventType === "click") {
-    const clientIp =
-      request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-      request.headers.get("x-real-ip") ||
-      "unknown";
-
+    const clientIp = getTrustedClientIp(request);
     const rateLimitKey = `${clientIp}:${affiliateId}`;
 
     if (!checkClickRateLimit(rateLimitKey)) {

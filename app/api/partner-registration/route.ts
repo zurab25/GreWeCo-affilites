@@ -96,8 +96,6 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const referralId = generateReferralId();
-
   const userRef = db.collection("users").doc(uid);
   const affiliateProfilesRef = db.collection("affiliateProfiles").doc(uid);
 
@@ -115,7 +113,22 @@ export async function POST(request: NextRequest) {
         throw new Error("INVITE_ALREADY_USED");
       }
 
-      const affiliateData = {
+      const existingData = existingUser.exists ? (existingUser.data() ?? {}) : {};
+      const existingRole =
+        typeof existingData.role === "string" && existingData.role.length > 0
+          ? existingData.role
+          : null;
+      const existingReferralId =
+        typeof existingData.referralId === "string" &&
+        existingData.referralId.length > 0
+          ? existingData.referralId
+          : null;
+
+      // Never overwrite an existing role or regenerate an existing referralId.
+      const referralId = existingReferralId ?? generateReferralId();
+      const userRole = existingRole ?? "affiliate";
+
+      const affiliateProfileData = {
         role: "affiliate",
         displayName,
         email,
@@ -135,16 +148,24 @@ export async function POST(request: NextRequest) {
         },
       };
 
-      transaction.set(affiliateProfilesRef, affiliateData);
+      transaction.set(affiliateProfilesRef, affiliateProfileData);
 
       if (existingUser.exists) {
-        transaction.update(userRef, {
-          role: "affiliate",
-          referralId,
+        const userUpdates: Record<string, unknown> = {
           affiliateProfileId: uid,
-        });
+        };
+        if (!existingRole) {
+          userUpdates.role = "affiliate";
+        }
+        if (!existingReferralId) {
+          userUpdates.referralId = referralId;
+        }
+        transaction.update(userRef, userUpdates);
       } else {
-        transaction.set(userRef, affiliateData);
+        transaction.set(userRef, {
+          ...affiliateProfileData,
+          role: userRole,
+        });
       }
 
       transaction.update(inviteDoc.ref, {
